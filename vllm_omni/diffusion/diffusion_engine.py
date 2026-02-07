@@ -211,8 +211,6 @@ class DiffusionEngine:
         profiler_config = self.od_config.profiler_config
         if profiler_config is not None and profiler_config.torch_profiler_dir:
             trace_dir = profiler_config.torch_profiler_dir
-        else:
-            trace_dir = os.environ.get("VLLM_TORCH_PROFILER_DIR", "./profiles")
 
         # Expand ~ and ~user, then make absolute (robust against cwd changes)
         trace_dir = os.path.expanduser(trace_dir)
