@@ -80,7 +80,7 @@ class DiffusionParallelConfig:
         )
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "DiffusionParallelConfig":
+    def from_dict(cls, data: dict[str, Any]) -> DiffusionParallelConfig:
         """
         Create DiffusionParallelConfig from a dictionary.
 
@@ -102,7 +102,7 @@ class TransformerConfig:
     params: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "TransformerConfig":
+    def from_dict(cls, data: dict[str, Any]) -> TransformerConfig:
         if not isinstance(data, dict):
             raise TypeError(f"Expected transformer config dict, got {type(data)!r}")
         return cls(params=dict(data))
@@ -193,7 +193,7 @@ class DiffusionCacheConfig:
     _extra_params: dict[str, Any] = field(default_factory=dict, repr=False)
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "DiffusionCacheConfig":
+    def from_dict(cls, data: dict[str, Any]) -> DiffusionCacheConfig:
         """
         Create DiffusionCacheConfig from a dictionary.
 
@@ -460,6 +460,7 @@ class OmniDiffusionConfig:
 
         if isinstance(self.profiler_config, dict):
             from vllm_omni.diffusion.profiler.config import DiffusionProfilerConfig
+
             self.profiler_config = DiffusionProfilerConfig(**self.profiler_config)
 
         if self.max_cpu_loras is None:
@@ -471,7 +472,7 @@ class OmniDiffusionConfig:
         self.supports_multimodal_inputs = self.model_class_name in {"QwenImageEditPlusPipeline"}
 
     @classmethod
-    def from_kwargs(cls, **kwargs: Any) -> "OmniDiffusionConfig":
+    def from_kwargs(cls, **kwargs: Any) -> OmniDiffusionConfig:
         # Backwards-compatibility: older callers may use a diffusion-specific
         # "static_lora_scale" kwarg. Normalize it to the canonical "lora_scale"
         # before constructing the dataclass to avoid TypeError on unknown fields.

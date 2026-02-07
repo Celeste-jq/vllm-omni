@@ -6,8 +6,6 @@ from typing import Any, Literal
 
 from pydantic import Field
 from pydantic.dataclasses import dataclass
-from typing_extensions import Self
-
 from vllm.config.utils import config
 from vllm.logger import init_logger
 from vllm.utils.hashing import safe_hash
@@ -101,9 +99,7 @@ class DiffusionProfilerConfig:
         profiler_dir = self.torch_profiler_dir
 
         if profiler_dir and self.profiler != "torch":
-            raise ValueError(
-                "torch_profiler_dir is only applicable when profiler is set to 'torch'"
-            )
+            raise ValueError("torch_profiler_dir is only applicable when profiler is set to 'torch'")
         if self.profiler == "torch" and not profiler_dir:
             raise ValueError("torch_profiler_dir must be set when profiler is 'torch'")
 

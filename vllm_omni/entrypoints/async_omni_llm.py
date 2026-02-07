@@ -163,10 +163,7 @@ class AsyncOmniLLM(AsyncLLM):
         except RuntimeError:
             pass
 
-        if (
-            vllm_config.profiler_config.profiler == "torch"
-            and not vllm_config.profiler_config.ignore_frontend
-        ):
+        if vllm_config.profiler_config.profiler == "torch" and not vllm_config.profiler_config.ignore_frontend:
             profiler_dir = vllm_config.profiler_config.torch_profiler_dir
             logger.info(
                 "Torch profiler enabled. AsyncOmniLLM CPU traces will be collected under %s",
