@@ -744,8 +744,6 @@ def _stage_worker(
         if task_type == OmniStageTaskType.PROFILER_START:
             if stage_type == "diffusion":
                 try:
-                    # Directory creation is now handled by DiffusionEngine.start_profile()
-                    # which uses CLI-based config or falls back to env var
                     trace_filename = f"stage_{stage_id}_diffusion_{int(_time.time())}"
                     stage_engine.start_profile(trace_filename=trace_filename)
                     logger.info("[Stage-%s] Diffusion Torch profiler started", stage_id)
@@ -1297,8 +1295,6 @@ async def _stage_worker_async(
         if task_type == OmniStageTaskType.PROFILER_START:
             if stage_type == "diffusion":
                 try:
-                    # Directory creation is now handled by DiffusionEngine.start_profile()
-                    # which uses CLI-based config or falls back to env var
                     trace_filename = f"stage_{stage_id}_diffusion_{int(time.time())}"
                     stage_engine.start_profile(trace_filename=trace_filename)
                     logger.info("[Stage-%s] Diffusion Torch profiler started", stage_id)
