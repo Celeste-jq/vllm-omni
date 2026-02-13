@@ -527,18 +527,13 @@ class OmniOpenAIServingChat(OpenAIServingChat, AudioMixin):
         if self.request_logger is None:
             return
         components = self._extract_prompt_components(inputs)
-        prompt = components.text
-        prompt_token_ids = components.token_ids
-        prompt_embeds = components.embeds
-
-        logger.info(
-            "Received request %s: prompt: %r, params_list: %s, prompt_token_ids: %s, prompt_embeds shape: %s, lora_request: %s.",  # noqa: E501
+        self.request_logger.log_inputs(
             request_id,
-            prompt,
-            params_list,
-            prompt_token_ids,
-            prompt_embeds.shape if prompt_embeds is not None else None,
-            lora_request,
+            components.text,
+            components.token_ids,
+            components.embeds,
+            params=params_list,
+            lora_request=lora_request,
         )
 
     async def chat_completion_stream_generator(

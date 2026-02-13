@@ -337,8 +337,8 @@ def run_multimodal_generation(args, client: OpenAI) -> None:
     thinker_sampling_params = {
         "temperature": 0.2,
         "top_p": 0.9,
-        "top_k": -1,
-        "max_tokens": 1200,
+        "top_k": 1,
+        "max_tokens": 16384,
         "repetition_penalty": 1.05,
         "logit_bias": {},
         "seed": SEED,
