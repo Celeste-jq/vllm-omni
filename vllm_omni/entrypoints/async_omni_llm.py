@@ -163,6 +163,7 @@ class AsyncOmniLLM(AsyncLLM):
         except RuntimeError:
             pass
 
+        # Use profiler_config from vllm_config (new way, aligned with vllm v1)
         if vllm_config.profiler_config.profiler == "torch" and not vllm_config.profiler_config.ignore_frontend:
             profiler_dir = vllm_config.profiler_config.torch_profiler_dir
             logger.info(
