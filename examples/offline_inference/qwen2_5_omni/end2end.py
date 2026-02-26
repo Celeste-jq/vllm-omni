@@ -379,7 +379,7 @@ def main(args):
 
     profiler_enabled = args.profiler_dir is not None
     if profiler_enabled:
-        omni_llm.start_profile(stages=[0])
+        omni_llm.start_profile(stages=args.profiler_stages)
     omni_generator = omni_llm.generate(prompts, sampling_params_list, py_generator=args.py_generator)
 
     # Determine output directory: prefer --output-dir; fallback to --output-wav
@@ -544,6 +544,13 @@ def parse_args():
         type=str,
         default=None,
         help="Directory to save torch profiler traces. Enables profiling when set.",
+    )
+    parser.add_argument(
+        "--profiler-stages",
+        type=int,
+        nargs="+",
+        default=None,
+        help="Stage IDs to profile (e.g. --profiler-stages 0 1 2). If not set, profiles all stages.",
     )
     return parser.parse_args()
 
