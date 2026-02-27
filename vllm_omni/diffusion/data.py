@@ -24,6 +24,7 @@ from vllm_omni.diffusion.utils.network_utils import is_port_available
 
 if TYPE_CHECKING:
     from vllm.config import ProfilerConfig
+
     from vllm_omni.diffusion.quantization import DiffusionQuantizationConfig
 
 # Import after TYPE_CHECKING to avoid circular imports at runtime
