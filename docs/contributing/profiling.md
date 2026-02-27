@@ -34,16 +34,19 @@ omni_llm.start_profile(stages=[1])
 omni_llm.start_profile(stages=[0, 2])
 ```
 
+> **Important:** Always pass the same `stages` list to both `start_profile()` and `stop_profile()`. If you omit `stages` from `stop_profile()`, it defaults to stopping all stages — including ones that were never started — which will produce errors.
+
 **Python Usage**: Wrap your generation logic with `start_profile()` and `stop_profile()`.
 
 ```python
 from vllm_omni import omni_llm
 
 profiler_enabled = bool(os.getenv("VLLM_TORCH_PROFILER_DIR"))
+profiler_stages = [0]  # Only profile the stages you need
 
 # 1. Start profiling if enabled
 if profiler_enabled:
-    omni_llm.start_profile(stages=[0])
+    omni_llm.start_profile(stages=profiler_stages)
 
 # Initialize generator
 omni_generator = omni_llm.generate(prompts, sampling_params_list, py_generator=args.py_generator)
@@ -64,7 +67,8 @@ for stage_outputs in omni_generator:
         print(f"[Info] Processed {processed_count}/{total_requests}. Stopping profiler inside active loop...")
 
         # Stop the profiler while workers are still active
-        omni_llm.stop_profile()
+        # Pass the same stages list used in start_profile()
+        omni_llm.stop_profile(stages=profiler_stages)
 
         # Wait for traces to flush to disk
         print("[Info] Waiting 30s for workers to write trace files to disk...")
@@ -74,6 +78,21 @@ for stage_outputs in omni_generator:
 omni_llm.close()
 ```
 
+
+**CLI Usage** (using `end2end.py`):
+```bash
+# Profile only Stage 0 (Thinker)
+python end2end.py --output-wav output_audio \
+    --query-type text --enable-profiler --profiler-stages 0
+
+# Profile Stage 0 and Stage 2
+python end2end.py --output-wav output_audio \
+    --query-type text --enable-profiler --profiler-stages 0 2
+
+# Profile all stages (omit --profiler-stages)
+python end2end.py --output-wav output_audio \
+    --query-type text --enable-profiler
+```
 
 **Examples**:
 
