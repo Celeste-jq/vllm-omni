@@ -20,9 +20,6 @@ RUN apt-get update && \
 # causing it to fall back to the older stable release from PyPI.
 RUN uv pip install --system --upgrade --force-reinstall --prerelease=allow vllm --extra-index-url https://wheels.vllm.ai/a60985b07eaf0fefa4c353ad2309b745707591ed
 
-RUN uv pip uninstall --system nvidia-cublas-cu12
-# Install vllm-omni into the same uv-managed Python environment used by the base image.
-# Use bash -c so that $(python3 -c ...) is expanded inside the container.
 RUN uv pip install --system --no-cache-dir ".[dev]"
 
 RUN ln -sf /usr/bin/python3 /usr/bin/python
