@@ -109,7 +109,7 @@ python end2end.py --output-wav output_audio \
 
 ### 3. Profiling diffusion models
 
-Diffusion profiling is End-to-End, capturing encoding, denoising loops, and decoding. Standalone diffusion scripts use `--profiler-dir` to enable profiling (this sets `profiler_config` internally).
+Diffusion profiling is End-to-End, capturing encoding, denoising loops, and decoding. Standalone diffusion scripts use `--enable-profiler` to enable profiling.
 
 **CLI Usage:**
 ```bash
@@ -117,7 +117,7 @@ python image_to_video.py \
     --model Wan-AI/Wan2.2-I2V-A14B-Diffusers \
     --image qwen-bear.png \
     --prompt "A cat playing with yarn, smooth motion" \
-    --profiler-dir ./perf \
+    --enable-profiler \
     \
     # Minimize Spatial Dimensions (Optional but helpful):
     #    Drastically reduces memory usage so the profiler doesn't
@@ -167,6 +167,12 @@ vllm serve Qwen/Qwen2.5-Omni-7B \
     --omni \
     --stage-configs-path qwen2_5_omni.yaml \
     --port 8091
+```
+
+Or for one stage diffusion models:
+
+```bash
+vllm serve Wan-AI/Wan2.2-I2V-A14B-Diffusers --omni --port 8091 --profiler-config '{"profiler": "torch", "torch_profiler_dir": "./vllm_profile"}'
 ```
 
 **2. Start profiling** by sending a POST request:

@@ -136,10 +136,10 @@ def parse_args() -> argparse.Namespace:
         help="Disable torch.compile and force eager execution.",
     )
     parser.add_argument(
-        "--profiler-dir",
+        "--enable-profiler",
         type=str,
         default=None,
-        help="Directory to save torch profiler traces. Enables profiling when set.",
+        help="Enables profiling when set.",
     )
     parser.add_argument(
         "--audio-sample-rate",

@@ -115,10 +115,10 @@ def parse_args() -> argparse.Namespace:
         help="Number of GPUs used for tensor parallelism (TP) inside the DiT.",
     )
     parser.add_argument(
-        "--profiler-dir",
+        "--enable-profiler",
         type=str,
         default=None,
-        help="Directory to save torch profiler traces. Enables profiling when set.",
+        help="Enables profiling when set.",
     )
     parser.add_argument(
         "--audio-sample-rate",

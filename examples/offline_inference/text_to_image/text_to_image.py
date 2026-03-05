@@ -213,10 +213,10 @@ def parse_args() -> argparse.Namespace:
         help="[NextStep-1.1 only] Apply layer normalization to sampled tokens.",
     )
     parser.add_argument(
-        "--profiler-dir",
+        "--enable-profiler",
         type=str,
         default=None,
-        help="Directory to save torch profiler traces. Enables profiling when set.",
+        help="Enables profiling when set.",
     )
     return parser.parse_args()
 

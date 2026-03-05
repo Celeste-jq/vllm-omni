@@ -528,10 +528,10 @@ def parse_args():
         help="Use py_generator mode. The returned type of Omni.generate() is a Python Generator object.",
     )
     parser.add_argument(
-        "--profiler-dir",
+        "--enable-profiler",
         type=str,
         default=None,
-        help="Directory to save torch profiler traces. Enables profiling when set.",
+        help="Enables profiling when set.",
     )
     parser.add_argument(
         "--profiler-stages",

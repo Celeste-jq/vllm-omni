@@ -9,6 +9,7 @@ Usage:
 import argparse
 import base64
 import json
+
 import requests
 
 
@@ -85,33 +86,23 @@ def send_video_request(
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Profile a single video generation request"
-    )
+    parser = argparse.ArgumentParser(description="Profile a single video generation request")
     parser.add_argument("--host", default="localhost", help="Server host")
     parser.add_argument("--port", type=int, default=8091, help="Server port")
-    parser.add_argument("--stages", type=int, nargs="*", default=[0, 1],
-                        help="Stage IDs to profile (default: [0, 1])")
-    parser.add_argument("--prompt", default="一只棕色野兔的正面特写镜头",
-                        help="Prompt for video generation")
-    parser.add_argument("--negative-prompt", default=" ",
-                        help="Negative prompt")
-    parser.add_argument("--input-reference", default="test1.jpeg",
-                        help="Path to reference image file")
-    parser.add_argument("--size", default="48x64",
-                        help="Video size (default: 48x64)")
-    parser.add_argument("--seconds", type=int, default=1,
-                        help="Video duration in seconds")
+    parser.add_argument("--stages", type=int, nargs="*", default=[0, 1], help="Stage IDs to profile (default: [0, 1])")
+    parser.add_argument("--prompt", default="一只棕色野兔的正面特写镜头", help="Prompt for video generation")
+    parser.add_argument("--negative-prompt", default=" ", help="Negative prompt")
+    parser.add_argument("--input-reference", default="test1.jpeg", help="Path to reference image file")
+    parser.add_argument("--size", default="48x64", help="Video size (default: 48x64)")
+    parser.add_argument("--seconds", type=int, default=1, help="Video duration in seconds")
     parser.add_argument("--fps", type=int, default=16, help="Frames per second")
-    parser.add_argument("--num-frames", type=int, default=2,
-                        help="Number of frames")
+    parser.add_argument("--num-frames", type=int, default=2, help="Number of frames")
     parser.add_argument("--guidance-scale", type=float, default=3.5)
     parser.add_argument("--guidance-scale-2", type=float, default=3.5)
     parser.add_argument("--flow-shift", type=float, default=5.0)
     parser.add_argument("--num-inference-steps", type=int, default=2)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--output", default="wan22_i2v_output.mp4",
-                        help="Output file path")
+    parser.add_argument("--output", default="wan22_i2v_output.mp4", help="Output file path")
     args = parser.parse_args()
 
     base_url = f"http://{args.host}:{args.port}"
