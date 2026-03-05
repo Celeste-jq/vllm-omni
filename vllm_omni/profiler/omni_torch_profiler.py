@@ -135,9 +135,7 @@ class OmniTorchProfilerWrapper(WorkerProfiler):
             table = self.profiler.key_averages().table(sort_by=sort_key)
 
             if not _is_uri_path(profiler_dir):
-                table_file = os.path.join(
-                    profiler_dir, f"profiler_out_{rank}.txt"
-                )
+                table_file = os.path.join(profiler_dir, f"profiler_out_{rank}.txt")
                 with open(table_file, "w") as f:
                     print(table, file=f)
                 self._table_path = table_file
@@ -146,11 +144,7 @@ class OmniTorchProfilerWrapper(WorkerProfiler):
                 print(table)
 
         if self.dump_cpu_time_total and rank == 0:
-            logger.info(
-                self.profiler.key_averages().table(
-                    sort_by="self_cpu_time_total", row_limit=50
-                )
-            )
+            logger.info(self.profiler.key_averages().table(sort_by="self_cpu_time_total", row_limit=50))
 
     @override
     def annotate_context_manager(self, name: str):
