@@ -47,6 +47,7 @@ class _FakeStageConfig:
         self.final_output = config_dict.get("final_output", False)
         self.final_output_type = config_dict.get("final_output_type", None)
         self.stage_id = config_dict.get("stage_id", 0)
+        self.engine_input_source = config_dict.get("engine_input_source", config_dict.get("input_sources", []))
         # Store original dict for reference
         self._config_dict = config_dict
 
@@ -137,6 +138,7 @@ class _FakeStage:
         self.engine_args = config.engine_args
         self.model_stage = getattr(config.engine_args, "model_stage", None)
         self.stage_type = "llm"
+        self.engine_input_source = getattr(config, "engine_input_source", [])
         # set default sampling params
         self.default_sampling_params = SamplingParams(temperature=1.0)
         # Allow configuring final_output and final_output_type
@@ -805,6 +807,129 @@ def test_generate_pipeline_and_final_outputs(monkeypatch: pytest.MonkeyPatch, mo
     assert not omni.stage_list[0]._in_q.empty()
     # Verify stage 1 received forwarded task (process_engine_inputs was called)
     assert omni.stage_list[1].process_engine_inputs([], []) is not None
+
+
+def test_generate_branching_pipeline_fanout(monkeypatch: pytest.MonkeyPatch, mocker: MockerFixture, fake_stage_config):
+    """Test that one upstream stage can forward to multiple downstream stages."""
+    stage_cfg0 = dict(fake_stage_config)
+    stage_cfg0["stage_id"] = 0
+    stage_cfg0["final_output"] = True
+    stage_cfg0["final_output_type"] = "text"
+
+    stage_cfg1 = dict(fake_stage_config)
+    stage_cfg1["stage_id"] = 1
+    stage_cfg1["engine_input_source"] = [0]
+    stage_cfg1["processed_input"] = ["processed-for-stage-1"]
+    stage_cfg1["final_output"] = True
+    stage_cfg1["final_output_type"] = "image"
+
+    stage_cfg2 = dict(fake_stage_config)
+    stage_cfg2["stage_id"] = 2
+    stage_cfg2["engine_input_source"] = [0]
+    stage_cfg2["processed_input"] = ["processed-for-stage-2"]
+    stage_cfg2["final_output"] = True
+    stage_cfg2["final_output_type"] = "audio"
+
+    def _fake_loader(
+        model: str,
+        stage_configs_path: str | None = None,
+        base_engine_args: dict | None = None,
+        default_stage_cfg_factory=None,
+    ):
+        return None, [
+            _FakeStageConfig(stage_cfg0),
+            _FakeStageConfig(stage_cfg1),
+            _FakeStageConfig(stage_cfg2),
+        ]
+
+    def _fake_initialize_orchestrator_connectors(config_path, worker_backend=None, shm_threshold_bytes=None):
+        return None, {
+            ("0", "1"): mocker.MagicMock(),
+            ("0", "2"): mocker.MagicMock(),
+        }
+
+    import sys
+
+    for module_name in [
+        "vllm_omni.entrypoints.utils",
+        "vllm_omni.entrypoints.omni",
+        "vllm_omni.entrypoints.omni_stage",
+        "vllm_omni.distributed.omni_connectors.adapter",
+        "vllm_omni.distributed.omni_connectors",
+    ]:
+        if module_name in sys.modules:
+            del sys.modules[module_name]
+
+    _setup_engine_mocks(monkeypatch, mocker)
+    _setup_multiprocessing_mocks(monkeypatch, mocker)
+    _setup_ipc_mocks(monkeypatch)
+    _setup_log_mocks(monkeypatch)
+
+    monkeypatch.setattr(
+        "vllm_omni.entrypoints.utils.load_and_resolve_stage_configs",
+        _fake_loader,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "vllm_omni.entrypoints.omni_stage.OmniStage",
+        lambda cfg, **kwargs: _FakeStage(mocker, cfg, **kwargs),
+        raising=False,
+    )
+
+    import vllm_omni.entrypoints.omni as omni_module
+
+    monkeypatch.setattr(omni_module, "OmniStage", lambda cfg, **kwargs: _FakeStage(mocker, cfg, **kwargs))
+    monkeypatch.setattr(omni_module, "load_and_resolve_stage_configs", _fake_loader)
+    monkeypatch.setattr(
+        omni_module,
+        "initialize_orchestrator_connectors",
+        _fake_initialize_orchestrator_connectors,
+    )
+    _setup_connector_adapter_mock(monkeypatch, omni_module)
+
+    test_uuid = uuid.UUID("00000000-0000-0000-0000-000000000001")
+    monkeypatch.setattr(uuid, "uuid4", lambda: test_uuid)
+    monkeypatch.setattr(omni_module, "uuid", uuid)
+
+    from vllm_omni.entrypoints.omni import Omni
+
+    omni = Omni(model=MODEL, init_timeout=1)
+    expected_request_id = f"0_{test_uuid}"
+
+    omni.stage_list[0]._out_q.put_nowait(
+        {
+            "request_id": expected_request_id,
+            "engine_outputs": [{"stage": 0, "text": "s0"}],
+            "metrics": {"num_tokens_out": 1, "stage_gen_time_ms": 10.0},
+        }
+    )
+    omni.stage_list[1]._out_q.put_nowait(
+        {
+            "request_id": expected_request_id,
+            "engine_outputs": [{"stage": 1, "image": "s1"}],
+            "metrics": {"num_tokens_out": 1, "stage_gen_time_ms": 10.0},
+        }
+    )
+    omni.stage_list[2]._out_q.put_nowait(
+        {
+            "request_id": expected_request_id,
+            "engine_outputs": [{"stage": 2, "audio": "s2"}],
+            "metrics": {"num_tokens_out": 1, "stage_gen_time_ms": 10.0},
+        }
+    )
+
+    outputs = omni.generate(
+        prompts=["hi"],
+        sampling_params_list=[
+            SamplingParams(temperature=0.7),
+            SamplingParams(temperature=0.8),
+            SamplingParams(temperature=0.9),
+        ],
+    )
+
+    assert len(outputs) == 3
+    assert not omni.stage_list[1]._in_q.empty()
+    assert not omni.stage_list[2]._in_q.empty()
 
 
 def test_generate_no_final_output_returns_empty(

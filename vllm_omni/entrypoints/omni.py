@@ -353,6 +353,8 @@ class OmniBase:
         self.stage_list = [st for _, st in results]
         self.default_sampling_params_list = [st.default_sampling_params for st in self.stage_list]
         self.output_modalities = [st.final_output_type for st in self.stage_list]
+        self._downstream_stage_ids = self._build_downstream_stage_ids()
+        self._reachable_output_modalities = self._build_reachable_output_modalities()
         logger.info(f"[{self._name}] Loaded {len(self.stage_list)} stages")
 
         # Phase 1 optimization: for a single diffusion stage in async mode,
@@ -375,6 +377,85 @@ class OmniBase:
         self._wait_for_stages_ready(timeout=init_timeout)
         # Set up RPC result checkers so that collective_rpc works
         self._setup_rpc_result_checkers()
+
+    def _get_stage_input_sources(self, stage_id: int) -> list[int]:
+        if 0 <= stage_id < len(self.stage_list):
+            stage = self.stage_list[stage_id]
+            sources = getattr(stage, "engine_input_source", None)
+            if sources:
+                return list(sources)
+
+        if 0 <= stage_id < len(self.stage_configs):
+            cfg = self.stage_configs[stage_id]
+            sources = getattr(cfg, "input_sources", None) or getattr(cfg, "engine_input_source", None)
+            if sources:
+                return list(sources)
+
+        return []
+
+    def _build_downstream_stage_ids(self) -> dict[int, list[int]]:
+        downstream_by_stage = {stage_id: [] for stage_id in range(len(self.stage_list))}
+        has_explicit_edges = False
+
+        for stage_id in range(len(self.stage_list)):
+            for source_stage_id in self._get_stage_input_sources(stage_id):
+                if 0 <= source_stage_id < len(self.stage_list):
+                    downstream_by_stage[source_stage_id].append(stage_id)
+                    has_explicit_edges = True
+
+        if not has_explicit_edges:
+            return {
+                stage_id: ([stage_id + 1] if stage_id + 1 < len(self.stage_list) else [])
+                for stage_id in range(len(self.stage_list))
+            }
+
+        return {
+            stage_id: sorted(set(next_stage_ids))
+            for stage_id, next_stage_ids in downstream_by_stage.items()
+        }
+
+    def _build_reachable_output_modalities(self) -> dict[int, set[str]]:
+        cache: dict[int, set[str]] = {}
+
+        def _collect(stage_id: int) -> set[str]:
+            if stage_id in cache:
+                return cache[stage_id]
+
+            modalities: set[str] = set()
+            stage = self.stage_list[stage_id]
+            if getattr(stage, "final_output", False) and stage.final_output_type is not None:
+                modalities.add(stage.final_output_type)
+
+            for next_stage_id in self._downstream_stage_ids.get(stage_id, []):
+                modalities.update(_collect(next_stage_id))
+
+            cache[stage_id] = modalities
+            return modalities
+
+        for stage_id in range(len(self.stage_list)):
+            _collect(stage_id)
+
+        return cache
+
+    def _get_requested_output_modalities(self, prompt: Any) -> set[str]:
+        valid_modalities = {m for m in self.output_modalities if m is not None}
+        requested_modalities = prompt.get("modalities", None) if isinstance(prompt, dict) else None
+
+        if requested_modalities is None:
+            return valid_modalities
+
+        filtered_modalities = {modality for modality in requested_modalities if modality in valid_modalities}
+        invalid_modalities = set(requested_modalities) - filtered_modalities
+        for modality in invalid_modalities:
+            logger.warning("Invalid output modality: %s, ignoring it", modality)
+        return filtered_modalities or valid_modalities
+
+    def _get_active_downstream_stage_ids(self, stage_id: int, requested_modalities: set[str]) -> list[int]:
+        return [
+            next_stage_id
+            for next_stage_id in self._downstream_stage_ids.get(stage_id, [])
+            if self._reachable_output_modalities.get(next_stage_id, set()) & requested_modalities
+        ]
 
     def _init_inline_diffusion_engine(
         self,
@@ -1136,11 +1217,11 @@ class Omni(OmniBase):
 
         # Determine the final stage for E2E stats (highest stage_id with final_output=True; fallback to last stage)
         final_stage_id_to_prompt: dict[str, int] = {}
+        requested_modalities_by_prompt: dict[str, set[str]] = {}
         for rid, prompt in request_id_to_prompt.items():
-            if isinstance(prompt, dict):
-                prompt_modalities = prompt.get("modalities", None)
-            else:
-                prompt_modalities = None
+            requested_modalities = self._get_requested_output_modalities(prompt)
+            requested_modalities_by_prompt[rid] = requested_modalities
+            prompt_modalities = list(requested_modalities)
             final_stage_id_for_e2e = get_final_stage_id_for_e2e(
                 prompt_modalities, self.output_modalities, self.stage_list
             )
@@ -1199,6 +1280,7 @@ class Omni(OmniBase):
         # For each stage, forward results to next stage; collect finals at the end
         # We pipeline by continually polling output queues in stage order
         remaining_by_stage: list[int] = [len(request_prompts) + cfg.num_companions] + [0] * (num_stages - 1)
+        in_flight_requests: dict[str, int] = {req_id: 1 for req_id in request_id_to_prompt}
         completed_requests = 0
         total_requests = len(request_prompts)
 
@@ -1226,6 +1308,7 @@ class Omni(OmniBase):
                                 f"[{self._name}] Parent {parent_id} aborted due to "
                                 f"companion failure ({completed_requests}/{total_requests})",
                             )
+                            in_flight_requests.pop(parent_id, None)
                     continue
 
                 if result.get("type") == "stage_ready":
@@ -1238,6 +1321,10 @@ class Omni(OmniBase):
                 if cfg.is_companion(req_id) and stage_id == 0:
                     ready_parent = cfg.on_companion_completed(req_id)
                     if ready_parent is not None:
+                        ready_parent_downstream_stage_ids = self._get_active_downstream_stage_ids(
+                            0,
+                            requested_modalities_by_prompt[ready_parent],
+                        )
                         success = cfg.forward_parent_with_cfg(
                             ready_parent,
                             cfg.pop_pending_parent(ready_parent),
@@ -1245,17 +1332,20 @@ class Omni(OmniBase):
                             self.connectors,
                             sampling_params_list,
                             request_id_to_prompt,
-                            final_stage_id_to_prompt,
+                            ready_parent_downstream_stage_ids,
                             metrics,
                             remaining_by_stage,
                         )
                         if not success:
                             cfg.consume_parent_failure(ready_parent)
                             completed_requests += 1
+                            in_flight_requests.pop(ready_parent, None)
                             logger.error(
                                 f"[{self._name}] Parent {ready_parent} dropped due to CFG forwarding failure "
                                 f"({completed_requests}/{total_requests})",
                             )
+                        elif ready_parent in in_flight_requests:
+                            in_flight_requests[ready_parent] += len(ready_parent_downstream_stage_ids)
                     continue
 
                 engine_outputs = _load(result, obj_key="engine_outputs", shm_key="engine_outputs_shm")
@@ -1298,6 +1388,8 @@ class Omni(OmniBase):
                     f"[{self._name}] Stage-{stage_id} completed request {req_id}; forwarding or finalizing",
                 )
                 stage.set_engine_outputs(engine_outputs)
+                if req_id in in_flight_requests:
+                    in_flight_requests[req_id] = max(0, in_flight_requests[req_id] - 1)
 
                 if getattr(stage, "final_output", False):
                     logger.debug(
@@ -1345,13 +1437,17 @@ class Omni(OmniBase):
 
                     yield output_to_yield
 
-                next_stage_id = stage_id + 1
-                if next_stage_id <= final_stage_id_to_prompt[req_id]:
+                active_downstream_stage_ids = self._get_active_downstream_stage_ids(
+                    stage_id,
+                    requested_modalities_by_prompt[req_id],
+                )
+                if active_downstream_stage_ids:
                     # CFG: if this parent has companions, defer forwarding
                     if cfg.has_companions(req_id) and stage_id == 0:
                         if cfg.is_parent_failed(req_id):
                             cfg.consume_parent_failure(req_id)
                             completed_requests += 1
+                            in_flight_requests.pop(req_id, None)
                             logger.error(
                                 f"[{self._name}] Parent {req_id} skipped CFG forwarding due to "
                                 f"companion failure ({completed_requests}/{total_requests})",
@@ -1366,65 +1462,85 @@ class Omni(OmniBase):
                                 self.connectors,
                                 sampling_params_list,
                                 request_id_to_prompt,
-                                final_stage_id_to_prompt,
+                                active_downstream_stage_ids,
                                 metrics,
                                 remaining_by_stage,
                             )
                             if not success:
                                 cfg.consume_parent_failure(req_id)
                                 completed_requests += 1
+                                in_flight_requests.pop(req_id, None)
                                 logger.error(
                                     f"[{self._name}] Parent {req_id} dropped due to CFG forwarding failure "
                                     f"({completed_requests}/{total_requests})",
                                 )
+                            elif req_id in in_flight_requests:
+                                in_flight_requests[req_id] += len(active_downstream_stage_ids)
                         else:
                             cfg.defer_parent(req_id, engine_outputs, stage_id)
                         continue
 
-                    next_stage: OmniStage = self.stage_list[next_stage_id]
-                    try:
-                        # Derive inputs for the next stage, record preprocess time
-                        with metrics.stage_postprocess_timer(stage_id, req_id):
-                            next_inputs = next_stage.process_engine_inputs(
-                                self.stage_list, [request_id_to_prompt[req_id]]
+                    prepared_forwardings: list[tuple[int, Any, Any]] = []
+                    for next_stage_id in active_downstream_stage_ids:
+                        next_stage: OmniStage = self.stage_list[next_stage_id]
+                        try:
+                            with metrics.stage_postprocess_timer(stage_id, req_id):
+                                next_inputs = next_stage.process_engine_inputs(
+                                    self.stage_list,
+                                    [request_id_to_prompt[req_id]],
+                                )
+                        except Exception as e:
+                            completed_requests += 1
+                            in_flight_requests.pop(req_id, None)
+                            logger.exception(
+                                f"[{self._name}] Process engine inputs error for req {req_id}"
+                                f" at stage {next_stage_id}: {e} ({completed_requests}/{total_requests})",
                             )
-                    except Exception as e:
-                        completed_requests += 1
-                        logger.exception(
-                            f"[{self._name}] Process engine inputs error for req {req_id}"
-                            f" at stage {next_stage_id}: {e} ({completed_requests}/{total_requests})",
-                        )
+                            break
+
+                        sp_next = sampling_params_list[next_stage_id]  # type: ignore[index]
+                        prepared_forwardings.append((next_stage_id, next_inputs, sp_next))
+
+                    if req_id not in in_flight_requests:
                         continue
-                    sp_next = sampling_params_list[next_stage_id]  # type: ignore[index]
 
-                    # Check if we have a connector for this edge
-                    connector_key = (str(stage_id), str(next_stage_id))
-                    connector = self.connectors.get(connector_key)
-                    sent_via_connector = False
-                    if connector:
-                        sent_via_connector = try_send_via_connector(
-                            connector=connector,
-                            stage_id=stage_id,
-                            next_stage_id=next_stage_id,
-                            req_id=req_id,
-                            next_inputs=next_inputs,
-                            sampling_params=sp_next,
-                            original_prompt=request_id_to_prompt[req_id],
-                            next_stage_queue_submit_fn=self.stage_list[next_stage_id].submit,
-                            metrics=metrics,
+                    forwarded_stage_ids: list[int] = []
+                    for next_stage_id, next_inputs, sp_next in prepared_forwardings:
+                        connector_key = (str(stage_id), str(next_stage_id))
+                        connector = self.connectors.get(connector_key)
+                        sent_via_connector = False
+                        if connector:
+                            sent_via_connector = try_send_via_connector(
+                                connector=connector,
+                                stage_id=stage_id,
+                                next_stage_id=next_stage_id,
+                                req_id=req_id,
+                                next_inputs=next_inputs,
+                                sampling_params=sp_next,
+                                original_prompt=request_id_to_prompt[req_id],
+                                next_stage_queue_submit_fn=self.stage_list[next_stage_id].submit,
+                                metrics=metrics,
+                            )
+
+                        if not sent_via_connector:
+                            raise RuntimeError(
+                                f"[{self._name}] Failed to send request {req_id} to stage-{next_stage_id} via connector. "
+                                "Configure a connector for this edge or inspect connector logs for details."
+                            )
+
+                        forwarded_stage_ids.append(next_stage_id)
+                        logger.debug(
+                            f"[{self._name}] Forwarded request {req_id} to stage-{next_stage_id}",
                         )
+                        remaining_by_stage[next_stage_id] += 1
 
-                    if not sent_via_connector:
-                        raise RuntimeError(
-                            f"[{self._name}] Failed to send request {req_id} to stage-{next_stage_id} via connector. "
-                            "Configure a connector for this edge or inspect connector logs for details."
-                        )
-
-                    logger.debug(
-                        f"[{self._name}] Forwarded request {req_id} to stage-{next_stage_id}",
-                    )
-                    remaining_by_stage[next_stage_id] += 1
+                    if req_id in in_flight_requests:
+                        in_flight_requests[req_id] += len(forwarded_stage_ids)
                 else:
+                    pass
+
+                if req_id in in_flight_requests and in_flight_requests[req_id] == 0:
+                    in_flight_requests.pop(req_id, None)
                     completed_requests += 1
                     if pbar:
                         final_mod = self.output_modalities[final_stage_id_to_prompt[req_id]]

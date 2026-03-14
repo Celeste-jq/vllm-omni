@@ -7,6 +7,11 @@ from vllm.logger import init_logger
 from vllm.transformers_utils.gguf_utils import is_gguf
 
 from vllm_omni.config import OmniModelConfig
+from vllm_omni.model_executor.models.voxcpm.configuration_voxcpm import VoxCPMConfig
+from vllm_omni.model_executor.models.voxcpm.native_config import (
+    detect_native_voxcpm_model_type,
+    ensure_hf_compatible_voxcpm_config,
+)
 from vllm_omni.plugins import load_omni_general_plugins
 
 logger = init_logger(__name__)
@@ -24,12 +29,26 @@ def _register_omni_hf_configs() -> None:
         logger.warning("Skipping omni HF config registration due to import error: %s", exc)
         return
 
-    try:
-        AutoConfig.register("qwen3_tts", Qwen3TTSConfig)
-        AutoConfig.register("cosyvoice3", CosyVoice3Config)
-    except ValueError:
-        # Already registered elsewhere; ignore.
-        return
+    for model_type, config_cls in (
+        ("qwen3_tts", Qwen3TTSConfig),
+        ("cosyvoice3", CosyVoice3Config),
+        ("voxcpm", VoxCPMConfig),
+    ):
+        try:
+            AutoConfig.register(model_type, config_cls)
+        except ValueError:
+            # Already registered elsewhere; ignore.
+            continue
+
+
+def _maybe_prepare_model_hf_config_path(model: str, hf_config_path: str | None) -> str | None:
+    if hf_config_path:
+        return hf_config_path
+
+    if detect_native_voxcpm_model_type(model) == "voxcpm":
+        return ensure_hf_compatible_voxcpm_config(model)
+
+    return hf_config_path
 
 
 def register_omni_models_to_vllm():
@@ -113,6 +132,7 @@ class OmniEngineArgs(EngineArgs):
 
         # register omni models to avoid model not found error
         self._ensure_omni_models_registered()
+        self.hf_config_path = _maybe_prepare_model_hf_config_path(self.model, self.hf_config_path)
 
         # Keep compatibility when async args are constructed from partial payloads.
         limit_mm_per_prompt = getattr(self, "limit_mm_per_prompt", {})
@@ -275,6 +295,7 @@ class AsyncOmniEngineArgs(AsyncEngineArgs):
 
         # register omni models to avoid model not found error
         self._ensure_omni_models_registered()
+        self.hf_config_path = _maybe_prepare_model_hf_config_path(self.model, self.hf_config_path)
 
         # Keep compatibility when async args are constructed from partial payloads.
         limit_mm_per_prompt = getattr(self, "limit_mm_per_prompt", {})
