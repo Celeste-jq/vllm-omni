@@ -319,6 +319,9 @@ class OmniStage:
         # collective_rpc results so that ``collective_rpc`` can retrieve
         # them without competing for the output queue.
         self._rpc_result_checker: Callable[[str], dict | None] | None = None
+        # Inline engine reference — set when the orchestrator runs the engine
+        # directly in-process (no stage worker subprocess).
+        self._inline_engine: OmniDiffusion | None = None
 
     def set_engine(self, engine: LLMEngine) -> None:
         """Set the LLM engine for this stage.
@@ -393,6 +396,10 @@ class OmniStage:
 
     def stop_profile(self) -> dict:
         """Stop profiling by sending a signal to worker and waiting for response."""
+        # Inline engine: call stop_profile directly (no worker subprocess)
+        if self._inline_engine is not None:
+            return self._inline_engine.stop_profile()
+
         if self._in_q is None or self._out_q is None:
             logger.warning(f"[Stage-{self.stage_id}] Queues not initialized, cannot stop profile.")
             return {}
@@ -661,6 +668,16 @@ class OmniStage:
             payload: Dictionary containing task data (request_id, engine_inputs,
                 sampling_params, etc.)
         """
+        # Inline engine: handle profiler tasks directly (no worker subprocess)
+        if self._in_q is None and self._inline_engine is not None:
+            task_type = payload.get("type")
+            if task_type == OmniStageTaskType.PROFILER_START:
+                self._inline_engine.start_profile()
+                return
+            elif task_type == OmniStageTaskType.PROFILER_STOP:
+                self._inline_engine.stop_profile()
+                return
+
         assert self._in_q is not None
 
         # [Omni] Inject global request_id into additional_information for cross-stage ID consistency

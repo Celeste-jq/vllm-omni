@@ -440,6 +440,8 @@ class OmniBase:
             **engine_args,
         )
         self._inline_diffusion = True
+        # Give the stage a reference so submit/stop_profile work without queues
+        self.stage_list[stage_id]._inline_engine = self._inline_engine
 
         # These attributes are normally set by AsyncOmni._wait_for_stages_ready
         # but we skip that for inline mode. Set them to None since there is no
