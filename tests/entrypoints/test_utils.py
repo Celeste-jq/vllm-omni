@@ -340,3 +340,33 @@ class TestResolveModelConfigPath:
 
         assert config_path is not None
         assert config_path.endswith("vllm_omni/model_executor/stage_configs/voxcpm.yaml")
+
+    def test_resolves_native_voxcpm_to_npu_stage_yaml(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+        config_dict = _build_native_voxcpm_config()
+        model_dir = tmp_path / "voxcpm-model"
+        model_dir.mkdir()
+        (model_dir / "config.json").write_text(json.dumps(config_dict))
+
+        class _FakePlatform:
+            @staticmethod
+            def get_default_stage_config_path() -> str:
+                return "vllm_omni/platforms/npu/stage_configs"
+
+        def _raise_get_config(*args, **kwargs):
+            raise ValueError("native VoxCPM config is not HF-compatible")
+
+        monkeypatch.setattr("vllm_omni.entrypoints.utils.current_omni_platform", _FakePlatform())
+        monkeypatch.setattr("vllm_omni.entrypoints.utils.get_config", _raise_get_config)
+        monkeypatch.setattr(
+            "vllm_omni.entrypoints.utils.file_or_path_exists",
+            lambda model, filename, revision=None: filename == "config.json",
+        )
+        monkeypatch.setattr(
+            "vllm_omni.entrypoints.utils.get_hf_file_to_dict",
+            lambda filename, model, revision=None: config_dict,
+        )
+
+        config_path = resolve_model_config_path(str(model_dir))
+
+        assert config_path is not None
+        assert config_path.endswith("vllm_omni/platforms/npu/stage_configs/voxcpm.yaml")
