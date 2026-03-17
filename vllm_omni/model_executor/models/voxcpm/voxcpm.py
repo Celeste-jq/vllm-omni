@@ -9,7 +9,7 @@ import wave
 from contextlib import contextmanager
 from hashlib import sha256
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 from unittest.mock import patch
 
 import numpy as np
@@ -472,6 +472,17 @@ class VoxCPMForConditionalGeneration(nn.Module):
             self.model_stage,
             _device_to_string(target_device),
         )
+
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        """Load VoxCPM via its native runtime instead of vLLM's HF weight loader.
+
+        VoxCPM stages are constructed from the original local model directory using
+        ``VoxCPMModel.from_local`` / ``AudioVAE`` inside ``_ensure_model_loaded``.
+        The standard vLLM weight iterator is therefore not applicable here.
+        """
+        del weights
+        self._ensure_model_loaded()
+        return set()
 
     @staticmethod
     def _extract_val(info: dict[str, Any], key: str, default: Any) -> Any:

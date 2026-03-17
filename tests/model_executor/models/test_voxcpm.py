@@ -11,6 +11,7 @@ from vllm_omni.model_executor.models.voxcpm.voxcpm import (
     _DirectVoxCPMPipeline,
     _normalize_dtype_name,
     _prepare_runtime_model_dir,
+    VoxCPMForConditionalGeneration,
 )
 from vllm_omni.model_executor.stage_input_processors.voxcpm import latent2vae
 
@@ -165,3 +166,23 @@ def test_latent2vae_wraps_stage_outputs():
     assert prompts[0]["prompt_token_ids"] == [0]
     assert torch.equal(prompts[0]["additional_information"]["latent_audio_feat"], latent)
     assert prompts[0]["additional_information"]["sample_rate"] == [24000]
+
+
+def test_voxcpm_load_weights_uses_native_loader_without_consuming_iterator():
+    model = VoxCPMForConditionalGeneration.__new__(VoxCPMForConditionalGeneration)
+    torch.nn.Module.__init__(model)
+    load_calls: list[str] = []
+
+    def _fake_ensure_model_loaded():
+        load_calls.append("loaded")
+
+    model._ensure_model_loaded = _fake_ensure_model_loaded
+
+    def _weights():
+        raise AssertionError("vLLM weight iterator should not be consumed for native VoxCPM loading")
+        yield ("unused", torch.zeros(1))
+
+    loaded = model.load_weights(_weights())
+
+    assert loaded == set()
+    assert load_calls == ["loaded"]
