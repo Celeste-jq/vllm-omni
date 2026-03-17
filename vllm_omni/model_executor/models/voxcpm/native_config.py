@@ -87,8 +87,8 @@ def ensure_hf_compatible_voxcpm_config(model: str | Path) -> str | None:
 
     rendered = _build_hf_compatible_voxcpm_config(config_dict)
     digest = hashlib.sha256(f"{model_path}:{config_text}".encode("utf-8")).hexdigest()[:16]
-    out_dir = Path(tempfile.gettempdir()) / "vllm_omni_voxcpm_configs"
+    out_dir = Path(tempfile.gettempdir()) / "vllm_omni_voxcpm_configs" / digest
     out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / f"{digest}.json"
+    out_path = out_dir / "config.json"
     out_path.write_text(json.dumps(rendered, indent=2, sort_keys=True))
-    return str(out_path)
+    return str(out_dir)

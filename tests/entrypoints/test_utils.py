@@ -309,7 +309,9 @@ class TestVoxCPMNativeConfig:
         hf_config_path = ensure_hf_compatible_voxcpm_config(model_dir)
 
         assert hf_config_path is not None
-        rendered = json.loads(Path(hf_config_path).read_text())
+        rendered_path = Path(hf_config_path) / "config.json"
+        assert rendered_path.exists()
+        rendered = json.loads(rendered_path.read_text())
         assert rendered["model_type"] == "voxcpm"
         assert rendered["architectures"] == ["VoxCPMForConditionalGeneration"]
         assert rendered["patch_size"] == 2
