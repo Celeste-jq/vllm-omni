@@ -129,12 +129,11 @@ class NPUGenerationModelRunner(OmniNPUModelRunner):
                 num_scheduled_tokens_np = np.array(tokens, dtype=np.int32)
                 max_num_scheduled_tokens = int(num_scheduled_tokens_np.max())
 
-                (
-                    logits_indices,
-                    spec_decode_metadata,
-                ) = self._prepare_inputs(
-                    scheduler_output,
-                    num_scheduled_tokens_np,
+                logits_indices, spec_decode_metadata = self._unpack_prepare_inputs_result(
+                    self._prepare_inputs(
+                        scheduler_output,
+                        num_scheduled_tokens_np,
+                    )
                 )
 
                 num_tokens_unpadded = scheduler_output.total_num_scheduled_tokens
