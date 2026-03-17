@@ -40,7 +40,7 @@ from vllm_omni.diffusion.request import OmniDiffusionRequest
 from vllm_omni.diffusion.worker.diffusion_model_runner import DiffusionModelRunner
 from vllm_omni.lora.request import LoRARequest
 from vllm_omni.platforms import current_omni_platform
-from vllm_omni.profiler import OmniTorchProfilerWrapper
+from vllm_omni.profiler import OmniTorchProfilerWrapper, create_omni_profiler
 from vllm_omni.worker.gpu_memory_utils import get_process_gpu_memory
 
 logger = init_logger(__name__)
@@ -85,7 +85,7 @@ class DiffusionWorker:
         self.profiler: OmniTorchProfilerWrapper | None = None
         profiler_config = self.od_config.profiler_config
         if profiler_config and profiler_config.profiler == "torch":
-            self.profiler = OmniTorchProfilerWrapper(
+            self.profiler = create_omni_profiler(
                 profiler_config=profiler_config,
                 worker_name=f"diffusion_worker_{self.rank}",
                 local_rank=self.local_rank,

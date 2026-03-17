@@ -33,13 +33,13 @@ class OmniGPUWorkerBase(GPUWorker):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
-        # Replace vLLM's profiler with OmniTorchProfilerWrapper
+        # Replace vLLM's profiler with platform-specific profiler
         profiler_config = self.vllm_config.profiler_config
         if profiler_config.profiler == "torch":
-            from vllm_omni.profiler import OmniTorchProfilerWrapper
+            from vllm_omni.profiler import create_omni_profiler
 
             worker_name = f"stage-rank-{self.rank}"
-            self.profiler = OmniTorchProfilerWrapper(
+            self.profiler = create_omni_profiler(
                 profiler_config=profiler_config,
                 worker_name=worker_name,
                 local_rank=self.local_rank,
