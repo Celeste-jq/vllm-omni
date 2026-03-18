@@ -246,6 +246,109 @@ VoxCPM 的本地权重目录不是标准 HF 模型目录，所以默认的 `Mode
 - `stage_input_processors/voxcpm.py`：负责把上游 latent 输出转换成下游 VAE 能消费的输入格式。
 - `platforms/npu/stage_configs/*`：给 NPU 平台提供对应 stage 配置，避免 GPU/NPU 复用同一份参数时不合适。
 
+#### 两 stage 场景下每个 stage 的输入输出
+
+当前两 stage 配置对应的是：
+
+- Stage 0：`latent_generator`
+- Stage 1：`vae`
+
+##### Stage 0：latent_generator
+
+输入：
+
+- `prompt_token_ids`
+  这里只是占位符，主要为了满足 runner 的统一输入接口。
+- `additional_information`
+  真正有意义的字段包括：
+  - `text`
+  - `ref_audio` / `ref_text`
+  - 或 `prompt_wav_path` / `prompt_text`
+  - `cfg_value`
+  - `inference_timesteps`
+  - `min_len`
+  - `max_new_tokens` / `max_len`
+  - 若干 retry 参数
+
+输出：
+
+- `multimodal_outputs["latent_audio_feat"]`
+- `multimodal_outputs["sr"]`
+
+这里输出的是 **完整 latent tensor**，不是 chunk。
+
+需要特别说明：
+
+- 框架里 `multimodal_outputs["latent_audio_feat"]` 是一个 list
+- 这个 list 的语义是“batch 内每个 request 一项”
+- 它不是“同一个 request 的多个时间 chunk”
+
+也就是说，Stage 0 对单个请求的产物是“一次性完整 latent”。
+
+##### Stage 1：vae
+
+Stage 1 的输入不是文本，而是经过 `custom_process_input_func` 转换后的上游结果。
+
+这个转换逻辑在：
+
+- `vllm_omni/model_executor/stage_input_processors/voxcpm.py`
+
+它会把 Stage 0 的输出转成：
+
+- `prompt_token_ids=[0]`
+- `additional_information["latent_audio_feat"] = 上游完整 latent`
+- `additional_information["sample_rate"] = sr`
+
+因此，Stage 1 的真实核心输入是：
+
+- 完整 `latent_audio_feat`
+
+输出：
+
+- `multimodal_outputs["model_outputs"]`
+- `multimodal_outputs["sr"]`
+
+这里的 `model_outputs` 就是最终音频 waveform。
+
+##### 结论
+
+两 stage 模式下的数据流可以概括为：
+
+1. Stage 0 读取文本和参考条件，生成完整 latent
+2. `latent2vae()` 把完整 latent 包装成 Stage 1 输入
+3. Stage 1 读取完整 latent，一次性解码出完整音频
+
+#### 当前是否是流式输入输出
+
+当前实现 **不是流式 stage-to-stage**，而是“请求级两段式串行处理”。
+
+更具体地说：
+
+- Stage 0 不是边生成边输出 chunk，而是完成整个 latent 生成后再返回
+- Stage 1 不是边接收 latent 边解码，而是在拿到完整 latent 后一次性解码
+- 所以上下游之间传递的是“完整 request 结果”，不是“chunk 流”
+
+这背后的原因有三点：
+
+1. `generate_latents(...)` 当前返回的是完整 `pred_audio_feat`
+2. `latent2vae()` 读取的是上游完整 `engine_outputs`
+3. 当前 stage config 没有启用 `async_chunk` 式的 chunk 级联语义
+
+所以，虽然从 stage 结构上看是拆成了两个阶段，但它目前仍然是：
+
+- Stage 0 complete -> Stage 1 start
+
+而不是：
+
+- Stage 0 chunk 1 -> Stage 1 chunk 1
+- Stage 0 chunk 2 -> Stage 1 chunk 2
+
+如果未来要进一步做真正的流式版本，至少需要同时改三层：
+
+- 原生 VoxCPM latent 生成接口，要能增量吐出 latent chunk
+- stage_input_processor，要能把 chunk 级 latent 增量喂给下游
+- VAE stage，要能对 chunk 级 latent 做增量解码或可拼接解码
+
 ### 4. 让 orchestrator 能支持更灵活的 stage 依赖关系
 
 为了支撑“AR 主干 + 多下游分支”的总体目标，除了 VoxCPM 本身，还修改了 orchestrator 和 CFG companion 的逻辑：
