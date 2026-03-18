@@ -10,6 +10,7 @@ This section contains design documents and architecture specifications for vLLM-
 
 - [Disaggregated Inference](feature/disaggregated_inference.md)
 - [Ray-based Execution](feature/ray_based_execution.md)
+- [VoxCPM Adaptation Retro](feature/voxcpm_adaptation_retro.md)
 
 ## Module Design Documents
 
