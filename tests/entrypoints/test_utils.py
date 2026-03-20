@@ -2,6 +2,8 @@
 
 from collections import Counter
 from dataclasses import dataclass
+import json
+from pathlib import Path
 
 import pytest
 from pytest_mock import MockerFixture
@@ -12,7 +14,9 @@ from vllm_omni.entrypoints.utils import (
     _convert_dataclasses_to_dict,
     _filter_dict_like_object,
     filter_dataclass_kwargs,
+    resolve_model_config_path,
 )
+from vllm_omni.model_executor.models.voxcpm.native_config import ensure_hf_compatible_voxcpm_config
 
 pytestmark = [pytest.mark.core_model, pytest.mark.cpu]
 
@@ -269,3 +273,102 @@ class TestFilterDataclassKwargs:
         assert "unknown_top" not in result
         assert result["cache_config"]["rel_l1_thresh"] == 0.3
         assert "extra_param" not in result["cache_config"]
+
+
+def _build_native_voxcpm_config() -> dict:
+    return {
+        "lm_config": {
+            "bos_token_id": 1,
+            "eos_token_id": 2,
+            "vocab_size": 32000,
+            "hidden_size": 1024,
+            "intermediate_size": 4096,
+            "max_position_embeddings": 4096,
+            "num_attention_heads": 16,
+            "num_hidden_layers": 24,
+        },
+        "encoder_config": {"hidden_dim": 1024, "ffn_dim": 4096, "num_heads": 16, "num_layers": 4},
+        "dit_config": {
+            "hidden_dim": 1024,
+            "ffn_dim": 4096,
+            "num_heads": 16,
+            "num_layers": 4,
+            "cfm_config": {"inference_cfg_rate": 10},
+        },
+        "patch_size": 2,
+        "feat_dim": 64,
+    }
+
+
+class TestVoxCPMNativeConfig:
+    def test_ensure_hf_compatible_voxcpm_config(self, tmp_path: Path):
+        model_dir = tmp_path / "voxcpm-model"
+        model_dir.mkdir()
+        (model_dir / "config.json").write_text(json.dumps(_build_native_voxcpm_config()))
+
+        hf_config_path = ensure_hf_compatible_voxcpm_config(model_dir)
+
+        assert hf_config_path is not None
+        rendered_path = Path(hf_config_path) / "config.json"
+        assert rendered_path.exists()
+        rendered = json.loads(rendered_path.read_text())
+        assert rendered["model_type"] == "voxcpm"
+        assert rendered["architectures"] == ["VoxCPMForConditionalGeneration"]
+        assert rendered["patch_size"] == 2
+        assert rendered["feat_dim"] == 64
+
+
+class TestResolveModelConfigPath:
+    def test_resolves_native_voxcpm_to_stage_yaml(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+        config_dict = _build_native_voxcpm_config()
+        model_dir = tmp_path / "voxcpm-model"
+        model_dir.mkdir()
+        (model_dir / "config.json").write_text(json.dumps(config_dict))
+
+        def _raise_get_config(*args, **kwargs):
+            raise ValueError("native VoxCPM config is not HF-compatible")
+
+        monkeypatch.setattr("vllm_omni.entrypoints.utils.get_config", _raise_get_config)
+        monkeypatch.setattr(
+            "vllm_omni.entrypoints.utils.file_or_path_exists",
+            lambda model, filename, revision=None: filename == "config.json",
+        )
+        monkeypatch.setattr(
+            "vllm_omni.entrypoints.utils.get_hf_file_to_dict",
+            lambda filename, model, revision=None: config_dict,
+        )
+
+        config_path = resolve_model_config_path(str(model_dir))
+
+        assert config_path is not None
+        assert config_path.endswith("vllm_omni/model_executor/stage_configs/voxcpm.yaml")
+
+    def test_resolves_native_voxcpm_to_npu_stage_yaml(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+        config_dict = _build_native_voxcpm_config()
+        model_dir = tmp_path / "voxcpm-model"
+        model_dir.mkdir()
+        (model_dir / "config.json").write_text(json.dumps(config_dict))
+
+        class _FakePlatform:
+            @staticmethod
+            def get_default_stage_config_path() -> str:
+                return "vllm_omni/platforms/npu/stage_configs"
+
+        def _raise_get_config(*args, **kwargs):
+            raise ValueError("native VoxCPM config is not HF-compatible")
+
+        monkeypatch.setattr("vllm_omni.entrypoints.utils.current_omni_platform", _FakePlatform())
+        monkeypatch.setattr("vllm_omni.entrypoints.utils.get_config", _raise_get_config)
+        monkeypatch.setattr(
+            "vllm_omni.entrypoints.utils.file_or_path_exists",
+            lambda model, filename, revision=None: filename == "config.json",
+        )
+        monkeypatch.setattr(
+            "vllm_omni.entrypoints.utils.get_hf_file_to_dict",
+            lambda filename, model, revision=None: config_dict,
+        )
+
+        config_path = resolve_model_config_path(str(model_dir))
+
+        assert config_path is not None
+        assert config_path.endswith("vllm_omni/platforms/npu/stage_configs/voxcpm.yaml")
