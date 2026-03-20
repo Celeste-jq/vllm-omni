@@ -65,6 +65,33 @@ def _save_wav(mm: dict[str, Any], output_dir: Path, request_id: str) -> Path:
     return output_path
 
 
+def _as_request_outputs(stage_outputs: Any) -> list[Any]:
+    request_output = getattr(stage_outputs, "request_output", None)
+    if request_output is None:
+        return []
+    if isinstance(request_output, list):
+        return request_output
+    return [request_output]
+
+
+def _extract_mm_from_request_output(stage_outputs: Any, request_output: Any) -> dict[str, Any]:
+    outputs = getattr(request_output, "outputs", None) or []
+    if outputs:
+        mm = getattr(outputs[0], "multimodal_output", None)
+        if mm is not None:
+            return mm
+
+    mm = getattr(request_output, "multimodal_output", None)
+    if mm is not None:
+        return mm
+
+    mm = getattr(stage_outputs, "multimodal_output", None)
+    if mm is not None:
+        return mm
+
+    raise ValueError("No multimodal audio output found in request output.")
+
+
 def parse_args():
     parser = FlexibleArgumentParser(description="Offline split-stage VoxCPM inference with vLLM Omni")
     parser.add_argument(
@@ -166,9 +193,10 @@ def main(args) -> None:
     t_start = time.perf_counter()
     saved_paths: list[Path] = []
     for stage_outputs in omni.generate([prompt]):
-        for output in stage_outputs.request_output:
-            mm = output.outputs[0].multimodal_output
-            saved_paths.append(_save_wav(mm, output_dir, output.request_id))
+        for request_output in _as_request_outputs(stage_outputs):
+            mm = _extract_mm_from_request_output(stage_outputs, request_output)
+            request_id = str(getattr(request_output, "request_id", None) or getattr(stage_outputs, "request_id", "0"))
+            saved_paths.append(_save_wav(mm, output_dir, request_id))
     elapsed = time.perf_counter() - t_start
 
     for path in saved_paths:
