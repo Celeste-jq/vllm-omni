@@ -1,20 +1,13 @@
 # VoxCPM
 
-<<<<<<< HEAD
-This directory contains the offline example for running native VoxCPM in vLLM Omni on the `pure_voxcpm` branch.
-=======
 This directory contains the minimal offline example for running native VoxCPM in vLLM Omni on the `pure_voxcpm` branch.
->>>>>>> 7fad2f5bafb44c34dbb3fc296faf5e6032c41077
 
 It covers:
 
 - split-stage inference with `vllm_omni/model_executor/stage_configs/voxcpm.yaml`
 - text-only synthesis
 - voice cloning with `ref_audio` + `ref_text`
-<<<<<<< HEAD
 - batch processing with voice cloning support
-=======
->>>>>>> 7fad2f5bafb44c34dbb3fc296faf5e6032c41077
 
 ## Prerequisites
 
@@ -46,11 +39,7 @@ export VOXCPM_MODEL=/path/to/voxcpm-model
 
 ## Quick Start
 
-<<<<<<< HEAD
 ### Single Text Synthesis
-=======
-Text-only synthesis:
->>>>>>> 7fad2f5bafb44c34dbb3fc296faf5e6032c41077
 
 ```bash
 python examples/offline_inference/voxcpm/end2end.py \
@@ -58,17 +47,12 @@ python examples/offline_inference/voxcpm/end2end.py \
   --text "This is a split-stage VoxCPM synthesis example running on vLLM Omni."
 ```
 
-<<<<<<< HEAD
 ### Voice Cloning
-=======
-Voice cloning:
->>>>>>> 7fad2f5bafb44c34dbb3fc296faf5e6032c41077
 
 ```bash
 python examples/offline_inference/voxcpm/end2end.py \
   --model "$VOXCPM_MODEL" \
   --text "This sentence is synthesized with a cloned voice." \
-<<<<<<< HEAD
   --prompt-audio /path/to/reference.wav \
   --prompt-text "Transcript of the reference audio."
 ```
@@ -131,7 +115,7 @@ Or run individual examples by copying the commands from the script.
 
 - `--text` / `-t`: single text to synthesize
 - `--input` / `-i`: path to text file (one text per line)
-- `--jsonl-file`: path to JSONL file with audio/text pairs
+- `--jsonl-file`: path to a JSONL file with audio/text pairs
 
 ### Voice Cloning
 
@@ -157,9 +141,9 @@ Or run individual examples by copying the commands from the script.
 
 The script follows a clean, modular architecture similar to `qwen3_tts/end2end.py`:
 
-- **`cmd_synthesize(args)`**: Build inputs for single text synthesis (no voice cloning)
-- **`cmd_clone(args)`**: Build inputs for voice cloning with reference audio
-- **`cmd_batch(args)`**: Build inputs for batch processing from text file or JSONL file
+- **`_build_synthesize_input(args)`**: Build inputs for single text synthesis (no voice cloning)
+- **`_build_clone_input(args)`**: Build inputs for voice cloning with reference audio
+- **`_build_batch_input(args)`**: Build inputs for batch processing from text file or JSONL file
 - **`main(args)`**: Unified entry point that routes to appropriate command and calls `omni.generate()`
 
 This design ensures:
@@ -167,33 +151,14 @@ This design ensures:
 - Easy to extend with new modes
 - Consistent with vLLM Omni patterns
 - Minimal code duplication
-=======
-  --ref-audio /path/to/reference.wav \
-  --ref-text "Transcript of the reference audio."
-```
-
-Generated audio is saved to `output_audio/` by default.
-
-## Useful Arguments
-
-- `--stage-configs-path`: override the split-stage config path explicitly
-- `--cfg-value`: guidance value passed to VoxCPM
-- `--inference-timesteps`: number of diffusion timesteps
-- `--min-len`: minimum token length
-- `--max-new-tokens`: maximum token length
->>>>>>> 7fad2f5bafb44c34dbb3fc296faf5e6032c41077
 
 ## Notes
 
 - This branch only keeps the split-stage `latent_generator -> vae` pipeline.
 - It does not include the single-stage `voxcpm_full.yaml` path.
 - It does not include the OpenAI-compatible online speech serving adaptation.
-<<<<<<< HEAD
 - Voice cloning requires both `--prompt-audio` and `--prompt-text` (or audio/text in JSONL).
 - Batch processing with JSONL allows individual reference audio per text sample.
 - The batch processing implementation follows VoxCPM's CLI patterns from `VoxCPM/src/voxcpm/cli.py`.
 - Batch processing processes texts one by one (sequential), following VoxCPM's original behavior.
-- All parameter names are consistent with VoxCPM's original CLI.
-=======
-- Voice cloning requires both `--ref-audio` and `--ref-text`.
->>>>>>> 7fad2f5bafb44c34dbb3fc296faf5e6032c41077
+- All parameter names are consistent with VoxCPM's original CLI (excluding LoRA-related parameters).
