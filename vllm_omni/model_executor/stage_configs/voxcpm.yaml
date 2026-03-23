@@ -1,10 +1,7 @@
 stage_args:
   - stage_id: 0
     stage_type: llm
-<<<<<<< HEAD
-=======
     is_comprehension: true
->>>>>>> 7fad2f5bafb44c34dbb3fc296faf5e6032c41077
     runtime:
       devices: "0"
       max_batch_size: 1
