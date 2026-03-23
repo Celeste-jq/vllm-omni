@@ -2,7 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import math
+import os
 from collections.abc import Iterable
+from importlib.util import find_spec
 from typing import Any
 
 import torch
@@ -11,7 +13,6 @@ import torch.nn.functional as F
 from diffusers.models.attention import FeedForward
 from diffusers.models.embeddings import PixArtAlphaTextProjection, TimestepEmbedding, Timesteps
 from diffusers.models.modeling_outputs import Transformer2DModelOutput
-from diffusers.models.normalization import FP32LayerNorm
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
@@ -29,8 +30,202 @@ from vllm_omni.diffusion.distributed.sp_plan import (
     SequenceParallelOutput,
 )
 from vllm_omni.diffusion.forward_context import get_forward_context
+from vllm_omni.platforms import current_omni_platform
 
 logger = init_logger(__name__)
+_HAS_MINDIESD = find_spec("mindiesd") is not None
+_MINDIESD_FAST_LAYERNORM = None
+_MINDIESD_LAYERNORM_SCALE_SHIFT = None
+_WAN_FAST_LAYERNORM_ENABLE_ENV = "VLLM_OMNI_WAN_FAST_LAYERNORM_ENABLE"
+_WAN_FAST_LAYERNORM_IMPL_MODE_ENV = "VLLM_OMNI_WAN_FAST_LAYERNORM_IMPL_MODE"
+_WAN_ADALAYERNORM_ENABLE_ENV = "VLLM_OMNI_WAN_ADALAYERNORM_ENABLE"
+_WAN_FAST_LAYERNORM_SUPPORTED_DTYPES = (torch.float16, torch.bfloat16, torch.float32)
+
+
+def _get_mindiesd_fast_layernorm():
+    global _MINDIESD_FAST_LAYERNORM
+
+    if _MINDIESD_FAST_LAYERNORM is not None:
+        return _MINDIESD_FAST_LAYERNORM
+
+    if not _HAS_MINDIESD:
+        logger.warning_once("mindiesd package not found. WAN fast layernorm is unavailable.")
+        return None
+
+    try:
+        from mindiesd import fast_layernorm
+    except ImportError as e:
+        logger.warning_once(f"mindiesd.fast_layernorm import failed: {e}. Falling back to torch layer_norm.")
+        return None
+
+    _MINDIESD_FAST_LAYERNORM = fast_layernorm
+    return _MINDIESD_FAST_LAYERNORM
+
+
+def _get_mindiesd_layernorm_scale_shift():
+    global _MINDIESD_LAYERNORM_SCALE_SHIFT
+
+    if _MINDIESD_LAYERNORM_SCALE_SHIFT is not None:
+        return _MINDIESD_LAYERNORM_SCALE_SHIFT
+
+    if not _HAS_MINDIESD:
+        return None
+
+    try:
+        from mindiesd import layernorm_scale_shift
+    except ImportError as e:
+        logger.warning_once(
+            f"mindiesd.layernorm_scale_shift import failed: {e}. "
+            "Falling back to torch LayerNorm + scale/shift."
+        )
+        return None
+
+    _MINDIESD_LAYERNORM_SCALE_SHIFT = layernorm_scale_shift
+    return _MINDIESD_LAYERNORM_SCALE_SHIFT
+
+
+def _is_wan_fast_layernorm_enabled() -> bool:
+    """Read WAN fast-layernorm enable flag from env; enabled by default."""
+    enabled_str = os.getenv(_WAN_FAST_LAYERNORM_ENABLE_ENV, "1").strip().lower()
+    return enabled_str not in {"0", "false", "off", "no"}
+
+
+def _is_wan_adalayernorm_enabled() -> bool:
+    """Read WAN AdaLayerNorm enable flag from env; enabled by default."""
+    enabled_str = os.getenv(_WAN_ADALAYERNORM_ENABLE_ENV, "1").strip().lower()
+    return enabled_str not in {"0", "false", "off", "no"}
+
+
+def _get_wan_fast_layernorm_impl_mode() -> int:
+    """Read WAN fast-layernorm impl_mode from env; valid values are 0/1/2."""
+    impl_mode_str = os.getenv(_WAN_FAST_LAYERNORM_IMPL_MODE_ENV, "0")
+
+    try:
+        impl_mode = int(impl_mode_str)
+    except ValueError:
+        logger.warning_once(
+            f"Invalid {_WAN_FAST_LAYERNORM_IMPL_MODE_ENV}={impl_mode_str!r}; "
+            "expected one of {0, 1, 2}. Falling back to 0."
+        )
+        return 0
+
+    if impl_mode not in (0, 1, 2):
+        logger.warning_once(
+            f"Invalid {_WAN_FAST_LAYERNORM_IMPL_MODE_ENV}={impl_mode}; "
+            "expected one of {0, 1, 2}. Falling back to 0."
+        )
+        return 0
+
+    return impl_mode
+
+
+class WanFP32LayerNorm(nn.LayerNorm):
+    """WAN-only LayerNorm wrapper with optional MindIE-SD fast path on NPU."""
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        input_dtype = hidden_states.dtype
+        weight_dtype = self.weight.dtype if self.weight is not None else None
+        bias_dtype = self.bias.dtype if self.bias is not None else None
+        if current_omni_platform.is_npu() and hidden_states.dim() == 3:
+            if not _is_wan_fast_layernorm_enabled():
+                logger.info_once(
+                    "WAN fast layernorm disabled by "
+                    f"{_WAN_FAST_LAYERNORM_ENABLE_ENV}={os.getenv(_WAN_FAST_LAYERNORM_ENABLE_ENV)!r}."
+                )
+            elif hidden_states.dtype in _WAN_FAST_LAYERNORM_SUPPORTED_DTYPES:
+                fast_layernorm = _get_mindiesd_fast_layernorm()
+                if fast_layernorm is not None:
+                    try:
+                        impl_mode = _get_wan_fast_layernorm_impl_mode()
+                        if impl_mode == 2 and not (
+                            hidden_states.dtype == torch.float16
+                            and (weight_dtype is None or weight_dtype == torch.float16)
+                            and (bias_dtype is None or bias_dtype == torch.float16)
+                        ):
+                            logger.warning_once(
+                                "WAN fast layernorm impl_mode=2 requires all inputs to be float16; "
+                                "falling back to torch layer_norm."
+                            )
+                        else:
+                            fast_input = hidden_states.contiguous()
+                            logger.info_once(
+                                "WAN fast layernorm first call details: "
+                                f"shape={tuple(fast_input.shape)}, input_dtype={fast_input.dtype}, "
+                                f"weight_dtype={weight_dtype}, bias_dtype={bias_dtype}, impl_mode={impl_mode}."
+                            )
+                            logger.info_once(
+                                "WAN fast layernorm enabled via mindiesd.fast_layernorm "
+                                f"({_WAN_FAST_LAYERNORM_IMPL_MODE_ENV}={impl_mode})."
+                            )
+                            return fast_layernorm(self, fast_input, impl_mode=impl_mode, fused=True).to(input_dtype)
+                    except Exception as e:
+                        logger.warning_once(
+                            f"mindiesd.fast_layernorm failed in WAN path: {e}. "
+                            "Falling back to torch layer_norm."
+                        )
+            else:
+                logger.info_once(
+                    "WAN fast layernorm skipped due to unsupported dtype "
+                    f"{hidden_states.dtype}. Supported dtypes: {_WAN_FAST_LAYERNORM_SUPPORTED_DTYPES}."
+                )
+
+        weight = self.weight.float() if self.weight is not None else None
+        bias = self.bias.float() if self.bias is not None else None
+        hidden_states = F.layer_norm(
+            hidden_states.float(),
+            self.normalized_shape,
+            weight,
+            bias,
+            self.eps,
+        )
+        return hidden_states.to(input_dtype)
+
+
+def _wan_layernorm_scale_shift(
+    layernorm: nn.LayerNorm,
+    x: torch.Tensor,
+    scale: torch.Tensor,
+    shift: torch.Tensor,
+) -> torch.Tensor:
+    """WAN-only LN + scale/shift with optional MindIE-SD fused AdaLayerNorm on NPU."""
+    if current_omni_platform.is_npu() and x.dim() == 3 and _is_wan_adalayernorm_enabled():
+        # mindiesd.layernorm_scale_shift only supports scale/shift layouts [B,H] or [B,1,H].
+        scale_dim_ok = scale.dim() in (2, 3)
+        shift_dim_ok = shift.dim() in (2, 3)
+        scale_shape_ok = scale.dim() == 2 or (scale.dim() == 3 and scale.shape[1] == 1)
+        shift_shape_ok = shift.dim() == 2 or (shift.dim() == 3 and shift.shape[1] == 1)
+        if scale_dim_ok and shift_dim_ok and scale_shape_ok and shift_shape_ok:
+            layernorm_scale_shift = _get_mindiesd_layernorm_scale_shift()
+            if layernorm_scale_shift is not None:
+                try:
+                    fused_scale = scale.contiguous().to(x.dtype)
+                    fused_shift = shift.contiguous().to(x.dtype)
+                    logger.info_once(
+                        "WAN AdaLayerNorm enabled via mindiesd.layernorm_scale_shift "
+                        f"({_WAN_ADALAYERNORM_ENABLE_ENV}=1)."
+                    )
+                    return layernorm_scale_shift(layernorm, x.contiguous(), fused_scale, fused_shift, fused=True)
+                except Exception as e:
+                    logger.warning_once(
+                        f"mindiesd.layernorm_scale_shift failed in WAN path: {e}. "
+                        "Falling back to torch LayerNorm + scale/shift."
+                    )
+        else:
+            logger.info_once(
+                "WAN AdaLayerNorm fast path skipped: scale/shift shape not supported by mindiesd "
+                f"(scale={tuple(scale.shape)}, shift={tuple(shift.shape)})."
+            )
+    elif current_omni_platform.is_npu() and x.dim() == 3 and not _is_wan_adalayernorm_enabled():
+        logger.info_once(
+            "WAN AdaLayerNorm disabled by "
+            f"{_WAN_ADALAYERNORM_ENABLE_ENV}={os.getenv(_WAN_ADALAYERNORM_ENABLE_ENV)!r}."
+        )
+
+    if scale.dim() == 2:
+        scale = scale.unsqueeze(1)
+    if shift.dim() == 2:
+        shift = shift.unsqueeze(1)
+    return layernorm(x) * (1 + scale) + shift
 
 
 def apply_rotary_emb_wan(
@@ -230,9 +425,9 @@ class WanImageEmbedding(nn.Module):
     def __init__(self, in_features: int, out_features: int, pos_embed_seq_len: int | None = None):
         super().__init__()
 
-        self.norm1 = FP32LayerNorm(in_features)
+        self.norm1 = WanFP32LayerNorm(in_features)
         self.ff = FeedForward(in_features, out_features, mult=1, activation_fn="gelu")
-        self.norm2 = FP32LayerNorm(out_features)
+        self.norm2 = WanFP32LayerNorm(out_features)
         if pos_embed_seq_len is not None:
             self.pos_embed = nn.Parameter(torch.zeros(1, pos_embed_seq_len, in_features))
         else:
@@ -614,7 +809,7 @@ class WanTransformerBlock(nn.Module):
         head_dim = dim // num_heads
 
         # 1. Self-attention
-        self.norm1 = FP32LayerNorm(dim, eps, elementwise_affine=False)
+        self.norm1 = WanFP32LayerNorm(dim, eps, elementwise_affine=False)
         self.attn1 = WanSelfAttention(
             dim=dim,
             num_heads=num_heads,
@@ -630,11 +825,11 @@ class WanTransformerBlock(nn.Module):
             eps=eps,
             added_kv_proj_dim=added_kv_proj_dim,
         )
-        self.norm2 = FP32LayerNorm(dim, eps, elementwise_affine=True) if cross_attn_norm else nn.Identity()
+        self.norm2 = WanFP32LayerNorm(dim, eps, elementwise_affine=True) if cross_attn_norm else nn.Identity()
 
         # 3. Feed-forward
         self.ffn = WanFeedForward(dim=dim, inner_dim=ffn_dim, dim_out=dim)
-        self.norm3 = FP32LayerNorm(dim, eps, elementwise_affine=False)
+        self.norm3 = WanFP32LayerNorm(dim, eps, elementwise_affine=False)
 
         # Scale-shift table for modulation
         self.scale_shift_table = nn.Parameter(torch.randn(1, 6, dim) / dim**0.5)
@@ -665,17 +860,19 @@ class WanTransformerBlock(nn.Module):
             ).chunk(6, dim=1)
 
         # 1. Self-attention
-        norm_hidden_states = (self.norm1(hidden_states.float()) * (1 + scale_msa) + shift_msa).type_as(hidden_states)
+        norm_hidden_states = _wan_layernorm_scale_shift(self.norm1, hidden_states, scale_msa, shift_msa).type_as(
+            hidden_states
+        )
         attn_output = self.attn1(norm_hidden_states, rotary_emb, hidden_states_mask)
         hidden_states = (hidden_states.float() + attn_output * gate_msa).type_as(hidden_states)
 
         # 2. Cross-attention
-        norm_hidden_states = self.norm2(hidden_states.float()).type_as(hidden_states)
+        norm_hidden_states = self.norm2(hidden_states).type_as(hidden_states)
         attn_output = self.attn2(norm_hidden_states, encoder_hidden_states)
         hidden_states = hidden_states + attn_output
 
         # 3. Feed-forward
-        norm_hidden_states = (self.norm3(hidden_states.float()) * (1 + c_scale_msa) + c_shift_msa).type_as(
+        norm_hidden_states = _wan_layernorm_scale_shift(self.norm3, hidden_states, c_scale_msa, c_shift_msa).type_as(
             hidden_states
         )
         ff_output = self.ffn(norm_hidden_states)
@@ -848,7 +1045,7 @@ class WanTransformer3DModel(nn.Module):
         )
 
         # 4. Output norm & projection
-        self.norm_out = FP32LayerNorm(inner_dim, eps, elementwise_affine=False)
+        self.norm_out = WanFP32LayerNorm(inner_dim, eps, elementwise_affine=False)
         self.proj_out = nn.Linear(inner_dim, out_channels * math.prod(patch_size))
 
         # SP helper modules
@@ -932,11 +1129,7 @@ class WanTransformer3DModel(nn.Module):
         shift, scale = self.output_scale_shift_prepare(temb)
         shift = shift.to(hidden_states.device)
         scale = scale.to(hidden_states.device)
-        if shift.ndim == 2:  # T2V mode: unsqueeze for broadcasting
-            shift = shift.unsqueeze(1)
-            scale = scale.unsqueeze(1)
-
-        hidden_states = (self.norm_out(hidden_states.float()) * (1 + scale) + shift).type_as(hidden_states)
+        hidden_states = _wan_layernorm_scale_shift(self.norm_out, hidden_states, scale, shift).type_as(hidden_states)
         hidden_states = self.proj_out(hidden_states)
 
         hidden_states = hidden_states.reshape(
