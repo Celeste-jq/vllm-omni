@@ -166,8 +166,9 @@ class TestOmniBaseProfilerSignatureConsistency:
 
     def test_start_profile_signature(self):
         """Verify start_profile has the expected signature parameters."""
-        from vllm_omni.entrypoints.omni_base import OmniBase
         import inspect
+
+        from vllm_omni.entrypoints.omni_base import OmniBase
 
         sig = inspect.signature(OmniBase.start_profile)
         params = list(sig.parameters.keys())
@@ -179,8 +180,9 @@ class TestOmniBaseProfilerSignatureConsistency:
 
     def test_stop_profile_signature(self):
         """Verify stop_profile has the expected signature parameters."""
-        from vllm_omni.entrypoints.omni_base import OmniBase
         import inspect
+
+        from vllm_omni.entrypoints.omni_base import OmniBase
 
         sig = inspect.signature(OmniBase.stop_profile)
         params = list(sig.parameters.keys())
@@ -191,8 +193,9 @@ class TestOmniBaseProfilerSignatureConsistency:
 
     def test_start_profile_default_values(self):
         """Verify start_profile has correct default parameter values."""
-        from vllm_omni.entrypoints.omni_base import OmniBase
         import inspect
+
+        from vllm_omni.entrypoints.omni_base import OmniBase
 
         sig = inspect.signature(OmniBase.start_profile)
 
@@ -203,8 +206,9 @@ class TestOmniBaseProfilerSignatureConsistency:
 
     def test_stop_profile_default_values(self):
         """Verify stop_profile has correct default parameter values."""
-        from vllm_omni.entrypoints.omni_base import OmniBase
         import inspect
+
+        from vllm_omni.entrypoints.omni_base import OmniBase
 
         sig = inspect.signature(OmniBase.stop_profile)
 
@@ -217,8 +221,9 @@ class TestAsyncOmniProfilerSignatureConsistency:
 
     def test_async_start_profile_signature(self):
         """Verify AsyncOmni.start_profile has the expected signature parameters."""
-        from vllm_omni.entrypoints.async_omni import AsyncOmni
         import inspect
+
+        from vllm_omni.entrypoints.async_omni import AsyncOmni
 
         sig = inspect.signature(AsyncOmni.start_profile)
         params = list(sig.parameters.keys())
@@ -230,8 +235,9 @@ class TestAsyncOmniProfilerSignatureConsistency:
 
     def test_async_stop_profile_signature(self):
         """Verify AsyncOmni.stop_profile has the expected signature parameters."""
-        from vllm_omni.entrypoints.async_omni import AsyncOmni
         import inspect
+
+        from vllm_omni.entrypoints.async_omni import AsyncOmni
 
         sig = inspect.signature(AsyncOmni.stop_profile)
         params = list(sig.parameters.keys())
@@ -242,14 +248,16 @@ class TestAsyncOmniProfilerSignatureConsistency:
 
     def test_async_start_profile_is_coroutine(self):
         """Verify AsyncOmni.start_profile is an async method."""
-        from vllm_omni.entrypoints.async_omni import AsyncOmni
         import inspect
+
+        from vllm_omni.entrypoints.async_omni import AsyncOmni
 
         assert inspect.iscoroutinefunction(AsyncOmni.start_profile)
 
     def test_async_stop_profile_is_coroutine(self):
         """Verify AsyncOmni.stop_profile is an async method."""
-        from vllm_omni.entrypoints.async_omni import AsyncOmni
         import inspect
+
+        from vllm_omni.entrypoints.async_omni import AsyncOmni
 
         assert inspect.iscoroutinefunction(AsyncOmni.stop_profile)
