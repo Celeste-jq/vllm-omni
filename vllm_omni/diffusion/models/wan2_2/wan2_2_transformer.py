@@ -35,10 +35,8 @@ from vllm_omni.platforms import current_omni_platform
 logger = init_logger(__name__)
 _HAS_MINDIESD = find_spec("mindiesd") is not None
 _MINDIESD_FAST_LAYERNORM = None
-_MINDIESD_LAYERNORM_SCALE_SHIFT = None
 _WAN_FAST_LAYERNORM_ENABLE_ENV = "VLLM_OMNI_WAN_FAST_LAYERNORM_ENABLE"
 _WAN_FAST_LAYERNORM_IMPL_MODE_ENV = "VLLM_OMNI_WAN_FAST_LAYERNORM_IMPL_MODE"
-_WAN_ADALAYERNORM_ENABLE_ENV = "VLLM_OMNI_WAN_ADALAYERNORM_ENABLE"
 _WAN_FAST_LAYERNORM_SUPPORTED_DTYPES = (torch.float16, torch.bfloat16, torch.float32)
 
 
@@ -62,37 +60,9 @@ def _get_mindiesd_fast_layernorm():
     return _MINDIESD_FAST_LAYERNORM
 
 
-def _get_mindiesd_layernorm_scale_shift():
-    global _MINDIESD_LAYERNORM_SCALE_SHIFT
-
-    if _MINDIESD_LAYERNORM_SCALE_SHIFT is not None:
-        return _MINDIESD_LAYERNORM_SCALE_SHIFT
-
-    if not _HAS_MINDIESD:
-        return None
-
-    try:
-        from mindiesd import layernorm_scale_shift
-    except ImportError as e:
-        logger.warning_once(
-            f"mindiesd.layernorm_scale_shift import failed: {e}. "
-            "Falling back to torch LayerNorm + scale/shift."
-        )
-        return None
-
-    _MINDIESD_LAYERNORM_SCALE_SHIFT = layernorm_scale_shift
-    return _MINDIESD_LAYERNORM_SCALE_SHIFT
-
-
 def _is_wan_fast_layernorm_enabled() -> bool:
     """Read WAN fast-layernorm enable flag from env; enabled by default."""
     enabled_str = os.getenv(_WAN_FAST_LAYERNORM_ENABLE_ENV, "1").strip().lower()
-    return enabled_str not in {"0", "false", "off", "no"}
-
-
-def _is_wan_adalayernorm_enabled() -> bool:
-    """Read WAN AdaLayerNorm enable flag from env; enabled by default."""
-    enabled_str = os.getenv(_WAN_ADALAYERNORM_ENABLE_ENV, "1").strip().lower()
     return enabled_str not in {"0", "false", "off", "no"}
 
 
@@ -179,53 +149,6 @@ class WanFP32LayerNorm(nn.LayerNorm):
             self.eps,
         )
         return hidden_states.to(input_dtype)
-
-
-def _wan_layernorm_scale_shift(
-    layernorm: nn.LayerNorm,
-    x: torch.Tensor,
-    scale: torch.Tensor,
-    shift: torch.Tensor,
-) -> torch.Tensor:
-    """WAN-only LN + scale/shift with optional MindIE-SD fused AdaLayerNorm on NPU."""
-    if current_omni_platform.is_npu() and x.dim() == 3 and _is_wan_adalayernorm_enabled():
-        # mindiesd.layernorm_scale_shift only supports scale/shift layouts [B,H] or [B,1,H].
-        scale_dim_ok = scale.dim() in (2, 3)
-        shift_dim_ok = shift.dim() in (2, 3)
-        scale_shape_ok = scale.dim() == 2 or (scale.dim() == 3 and scale.shape[1] == 1)
-        shift_shape_ok = shift.dim() == 2 or (shift.dim() == 3 and shift.shape[1] == 1)
-        if scale_dim_ok and shift_dim_ok and scale_shape_ok and shift_shape_ok:
-            layernorm_scale_shift = _get_mindiesd_layernorm_scale_shift()
-            if layernorm_scale_shift is not None:
-                try:
-                    fused_scale = scale.contiguous().to(x.dtype)
-                    fused_shift = shift.contiguous().to(x.dtype)
-                    logger.info_once(
-                        "WAN AdaLayerNorm enabled via mindiesd.layernorm_scale_shift "
-                        f"({_WAN_ADALAYERNORM_ENABLE_ENV}=1)."
-                    )
-                    return layernorm_scale_shift(layernorm, x.contiguous(), fused_scale, fused_shift, fused=True)
-                except Exception as e:
-                    logger.warning_once(
-                        f"mindiesd.layernorm_scale_shift failed in WAN path: {e}. "
-                        "Falling back to torch LayerNorm + scale/shift."
-                    )
-        else:
-            logger.info_once(
-                "WAN AdaLayerNorm fast path skipped: scale/shift shape not supported by mindiesd "
-                f"(scale={tuple(scale.shape)}, shift={tuple(shift.shape)})."
-            )
-    elif current_omni_platform.is_npu() and x.dim() == 3 and not _is_wan_adalayernorm_enabled():
-        logger.info_once(
-            "WAN AdaLayerNorm disabled by "
-            f"{_WAN_ADALAYERNORM_ENABLE_ENV}={os.getenv(_WAN_ADALAYERNORM_ENABLE_ENV)!r}."
-        )
-
-    if scale.dim() == 2:
-        scale = scale.unsqueeze(1)
-    if shift.dim() == 2:
-        shift = shift.unsqueeze(1)
-    return layernorm(x) * (1 + scale) + shift
 
 
 def apply_rotary_emb_wan(
@@ -860,9 +783,7 @@ class WanTransformerBlock(nn.Module):
             ).chunk(6, dim=1)
 
         # 1. Self-attention
-        norm_hidden_states = _wan_layernorm_scale_shift(self.norm1, hidden_states, scale_msa, shift_msa).type_as(
-            hidden_states
-        )
+        norm_hidden_states = (self.norm1(hidden_states) * (1 + scale_msa) + shift_msa).type_as(hidden_states)
         attn_output = self.attn1(norm_hidden_states, rotary_emb, hidden_states_mask)
         hidden_states = (hidden_states.float() + attn_output * gate_msa).type_as(hidden_states)
 
@@ -872,7 +793,7 @@ class WanTransformerBlock(nn.Module):
         hidden_states = hidden_states + attn_output
 
         # 3. Feed-forward
-        norm_hidden_states = _wan_layernorm_scale_shift(self.norm3, hidden_states, c_scale_msa, c_shift_msa).type_as(
+        norm_hidden_states = (self.norm3(hidden_states) * (1 + c_scale_msa) + c_shift_msa).type_as(
             hidden_states
         )
         ff_output = self.ffn(norm_hidden_states)
@@ -1129,7 +1050,11 @@ class WanTransformer3DModel(nn.Module):
         shift, scale = self.output_scale_shift_prepare(temb)
         shift = shift.to(hidden_states.device)
         scale = scale.to(hidden_states.device)
-        hidden_states = _wan_layernorm_scale_shift(self.norm_out, hidden_states, scale, shift).type_as(hidden_states)
+        if shift.ndim == 2:  # T2V mode: unsqueeze for broadcasting
+            shift = shift.unsqueeze(1)
+            scale = scale.unsqueeze(1)
+
+        hidden_states = (self.norm_out(hidden_states) * (1 + scale) + shift).type_as(hidden_states)
         hidden_states = self.proj_out(hidden_states)
 
         hidden_states = hidden_states.reshape(

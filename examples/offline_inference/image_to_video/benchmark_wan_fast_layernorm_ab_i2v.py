@@ -2,23 +2,20 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 """
-A/B benchmark for WAN fast layernorm on image-to-video.
+A/B benchmark for WAN fast layernorm using image_to_video.py arguments directly.
 
-This script runs image_to_video.py in two cases:
-1) fast_on  : VLLM_OMNI_WAN_FAST_LAYERNORM_ENABLE=1
-2) fast_off : VLLM_OMNI_WAN_FAST_LAYERNORM_ENABLE=0
+This script only adds A/B control flags and forwards all remaining args to
+image_to_video.py exactly as-is.
 
-It records wall time, parsed generation time, and key fast-layernorm logs.
-
-Example:
+Usage example (same calling style as image_to_video.py):
   python examples/offline_inference/image_to_video/benchmark_wan_fast_layernorm_ab_i2v.py \
+    --repeats 3 \
     --model Wan-AI/Wan2.2-I2V-A14B-Diffusers \
     --image /path/to/input.jpg \
-    --prompt "A cinematic camera move around the subject." \
+    --prompt "A cat playing with yarn." \
     --num-inference-steps 8 \
     --height 480 --width 832 --num-frames 17 \
-    --repeats 3 \
-    -- --tensor-parallel-size 1 --enforce-eager
+    --tensor-parallel-size 4
 """
 
 from __future__ import annotations
@@ -32,7 +29,6 @@ import sys
 import time
 from pathlib import Path
 
-DEFAULT_MODEL = "Wan-AI/Wan2.2-I2V-A14B-Diffusers"
 ENV_ENABLE = "VLLM_OMNI_WAN_FAST_LAYERNORM_ENABLE"
 ENV_IMPL_MODE = "VLLM_OMNI_WAN_FAST_LAYERNORM_IMPL_MODE"
 GEN_TIME_PATTERN = re.compile(r"Total generation time:\s*([0-9.]+)\s*seconds")
@@ -51,26 +47,14 @@ def parse_mode(value: str) -> int:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="A/B benchmark for WAN fast layernorm on image-to-video.")
+    parser = argparse.ArgumentParser(
+        description="A/B benchmark for WAN fast layernorm on/off (image-to-video).",
+        allow_abbrev=False,
+    )
     parser.add_argument("--python-executable", default=sys.executable, help="Python executable used to launch runs.")
-    parser.add_argument("--model", default=DEFAULT_MODEL, help="WAN I2V model ID or local path.")
-    parser.add_argument("--image", required=True, help="Input image path for image_to_video.py.")
-    parser.add_argument("--prompt", default="", help="Generation prompt.")
-    parser.add_argument("--negative-prompt", default="", help="Negative prompt.")
-    parser.add_argument("--seed", type=int, default=42, help="Random seed.")
-    parser.add_argument("--guidance-scale", type=float, default=5.0, help="CFG guidance scale.")
-    parser.add_argument("--num-inference-steps", type=int, default=8, help="Sampling steps.")
-    parser.add_argument("--height", type=int, default=480, help="Output height.")
-    parser.add_argument("--width", type=int, default=832, help="Output width.")
-    parser.add_argument("--num-frames", type=int, default=17, help="Number of frames.")
     parser.add_argument("--repeats", type=int, default=1, help="Runs per case.")
     parser.add_argument("--impl-mode-on", type=parse_mode, default=0, help="impl_mode for fast_on case.")
-    parser.add_argument(
-        "--impl-mode-off",
-        type=parse_mode,
-        default=0,
-        help="impl_mode for fast_off case (kept for traceability; fast path is disabled).",
-    )
+    parser.add_argument("--impl-mode-off", type=parse_mode, default=0, help="impl_mode for fast_off case.")
     parser.add_argument("--output-dir", default="outputs_wan_fast_layernorm_ab_i2v", help="Output directory.")
     parser.add_argument("--dry-run", action="store_true", help="Print commands without running them.")
     parser.add_argument(
@@ -78,48 +62,35 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Continue benchmarking remaining runs when one run fails.",
     )
-    parser.add_argument(
-        "extra_args",
-        nargs=argparse.REMAINDER,
-        help="Extra args passed to image_to_video.py. Use '--' separator before extra args.",
-    )
-    return parser.parse_args()
+
+    args, image_to_video_args = parser.parse_known_args()
+    if image_to_video_args and image_to_video_args[0] == "--":
+        image_to_video_args = image_to_video_args[1:]
+    args.image_to_video_args = image_to_video_args
+    return args
+
+
+def _strip_output_args(args: list[str]) -> list[str]:
+    """Remove any existing --output args to avoid conflicts."""
+    out: list[str] = []
+    i = 0
+    while i < len(args):
+        token = args[i]
+        if token == "--output":
+            i += 2
+            continue
+        if token.startswith("--output="):
+            i += 1
+            continue
+        out.append(token)
+        i += 1
+    return out
 
 
 def build_cmd(args: argparse.Namespace, output_path: Path) -> list[str]:
     script_path = Path(__file__).with_name("image_to_video.py")
-    cmd = [
-        args.python_executable,
-        str(script_path),
-        "--model",
-        args.model,
-        "--image",
-        args.image,
-        "--prompt",
-        args.prompt,
-        "--negative-prompt",
-        args.negative_prompt,
-        "--seed",
-        str(args.seed),
-        "--guidance-scale",
-        str(args.guidance_scale),
-        "--num-inference-steps",
-        str(args.num_inference_steps),
-        "--height",
-        str(args.height),
-        "--width",
-        str(args.width),
-        "--num-frames",
-        str(args.num_frames),
-        "--output",
-        str(output_path),
-    ]
-
-    extra_args = args.extra_args
-    if extra_args and extra_args[0] == "--":
-        extra_args = extra_args[1:]
-    cmd.extend(extra_args)
-    return cmd
+    forwarded = _strip_output_args(args.image_to_video_args)
+    return [args.python_executable, str(script_path), *forwarded, "--output", str(output_path)]
 
 
 def extract_generation_time(output_text: str) -> float | None:
