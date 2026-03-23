@@ -35,7 +35,7 @@ class OmniGPUWorkerBase(GPUWorker):
 
         # Replace vLLM's profiler with platform-specific profiler
         profiler_config = self.vllm_config.profiler_config
-        if profiler_config.profiler == "torch":
+        if profiler_config and profiler_config.profiler == "torch":
             from vllm_omni.profiler import create_omni_profiler
 
             worker_name = f"stage-rank-{self.rank}"
