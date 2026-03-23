@@ -965,11 +965,15 @@ class OmniGPUModelRunner(GPUModelRunner):
             info = self.model_intermediate_buffer.get(req_id, {})
             if info:
                 info["generated_len"] = generated_len
+                if self.model.__class__.__name__ == "VoxCPMForConditionalGeneration":
+                    info["omni_req_id"] = req_id
                 per_req_runtime_info.append(info)
                 if "thinker_reply_part_per_request" in info:
                     q = info["thinker_reply_part_per_request"]
                     if hasattr(q, "shape"):
                         logger.debug(f"[OMNI] req={req_id} has thinker_reply_part_per_request queue shape: {q.shape}")
+            elif self.model.__class__.__name__ == "VoxCPMForConditionalGeneration":
+                per_req_runtime_info.append({"generated_len": generated_len, "omni_req_id": req_id})
             else:
                 per_req_runtime_info.append({})
         return per_req_runtime_info

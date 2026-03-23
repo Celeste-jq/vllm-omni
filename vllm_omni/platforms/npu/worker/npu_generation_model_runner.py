@@ -366,7 +366,11 @@ class NPUGenerationModelRunner(OmniNPUModelRunner):
                                 f"Multimodal output list for key '{key}' has length {len(out)} "
                                 f"but expected {num_reqs} (one entry per request)."
                             )
-                        mm_payload[key] = out[i].detach().to("cpu").contiguous()
+                        elem = out[i]
+                        if isinstance(elem, torch.Tensor):
+                            mm_payload[key] = elem.detach().to("cpu").contiguous()
+                        else:
+                            mm_payload[key] = elem
                     elif isinstance(out, torch.Tensor):
                         mm_payload[key] = out.detach().to("cpu").contiguous()
                     else:

@@ -58,6 +58,9 @@ class OmniChunkTransferAdapter(OmniTransferAdapterBase):
         self.waiting_for_chunk_waiting_requests: deque[Any] = deque()
         self.waiting_for_chunk_running_requests: deque[Any] = deque()
         self.requests_with_ready_chunks = set()
+        # Stage1 VoxCPM: SHM recv can outrun VAE; queue chunks here and re-enqueue recv work
+        # so the background thread keeps draining Stage0 puts while execute_model is busy.
+        self._latent_chunk_inbox: dict[str, deque[dict[str, Any]]] = defaultdict(deque)
 
     @classmethod
     def create_connector(cls, model_config: Any):
@@ -94,6 +97,11 @@ class OmniChunkTransferAdapter(OmniTransferAdapterBase):
             return
         if not hasattr(request, "additional_information"):
             request.additional_information = None
+        rid = request.request_id
+        if any(getattr(r, "request_id", None) == rid for r in self._pending_load_reqs):
+            with self._recv_cond:
+                self._recv_cond.notify()
+            return
         self._pending_load_reqs.append(request)
         with self._recv_cond:
             self._recv_cond.notify()
@@ -102,6 +110,8 @@ class OmniChunkTransferAdapter(OmniTransferAdapterBase):
         self,
         pooling_output: torch.Tensor | None = None,
         request: Request | None = None,
+        *,
+        cleanup_after_send: bool = False,
     ):
         """Build and enqueue one chunk for asynchronous sending.
 
@@ -111,15 +121,39 @@ class OmniChunkTransferAdapter(OmniTransferAdapterBase):
         Args:
             pooling_output: Partial pooling output dictionary
             request: Request object
+            cleanup_after_send: If True, run :meth:`cleanup` on the save thread
+                **after** ``connector.put`` completes for this task. Required when
+                the scheduler would otherwise call ``cleanup`` immediately after
+                ``save_async`` — that runs too early and clears ``put_req_chunk``
+                before the async send, so the last chunk would reuse key ``..._0_0``.
         """
         task = {
             "pooling_output": pooling_output,
             "request": request,
             "is_finished": request.is_finished(),
+            "cleanup_after_send": cleanup_after_send,
         }
         self._pending_save_reqs.append(task)
         with self._save_cond:
             self._save_cond.notify()
+
+    def _has_latent_inbox(self, request: Request) -> bool:
+        ext = getattr(request, "external_req_id", None) or request.request_id
+        q = self._latent_chunk_inbox.get(ext)
+        return bool(q)
+
+    def after_latent_chunk_consumed(self, request: Request) -> None:
+        """Pop one decoded latent chunk; expose the next buffered chunk if any."""
+        if self.connector.stage_id == 0:
+            return
+        ext = getattr(request, "external_req_id", None) or request.request_id
+        q = self._latent_chunk_inbox.get(ext)
+        if not q:
+            return
+        q.popleft()
+        if q:
+            request.additional_information = dict(q[0])
+            self.requests_with_ready_chunks.add(request.request_id)
 
     def _poll_single_request(self, request: Request):
         stage_id = self.connector.stage_id
@@ -157,18 +191,56 @@ class OmniChunkTransferAdapter(OmniTransferAdapterBase):
                 if payload_data.get("finished"):
                     self.finished_requests.add(req_id)
 
-                new_ids = payload_data.get("code_predictor_codes", [])
-                request.prompt_token_ids = new_ids
-                # Pass additional fields (like left_context_size) to the request
-                # Only pass chunk context metadata in additional_information
-                request.additional_information = {}
-                if "left_context_size" in payload_data:
-                    request.additional_information["left_context_size"] = payload_data["left_context_size"]
-                request.num_computed_tokens = 0
+                # VoxCPM: each SHM payload is one time-chunk from Stage0. Pass *only this chunk*
+                # to Stage1 so VAE decodes incrementally (no cat of full history per step).
+                # Chunk count is driven by Stage0/model; we only forward each piece as it arrives.
+                if "latent_audio_feat" in payload_data:
+                    prev_meta = self.request_payload.get(external_req_id) or {}
+                    chunk_count = int(prev_meta.get("_latent_chunk_count", 0)) + 1
+                    self.request_payload[external_req_id] = {
+                        "_latent_chunk_count": chunk_count,
+                    }
 
-                # Empty chunk with more data expected: keep polling.
-                if not new_ids and not payload_data.get("finished"):
-                    return True
+                    chunk_dict = dict(payload_data)
+                    chunk_dict["_latent_chunk_count"] = chunk_count
+                    self._latent_chunk_inbox[external_req_id].append(chunk_dict)
+                    # Always decode the oldest chunk first (FIFO) even if SHM delivers faster than VAE.
+                    request.additional_information = dict(self._latent_chunk_inbox[external_req_id][0])
+                    if not getattr(request, "prompt_token_ids", None):
+                        request.prompt_token_ids = [0]
+                        request.num_computed_tokens = 0
+                    else:
+                        request.prompt_token_ids.append(0)
+                    cur_latent = payload_data.get("latent_audio_feat")
+                    n_time = None
+                    if isinstance(cur_latent, torch.Tensor):
+                        if cur_latent.ndim == 3:
+                            n_time = int(cur_latent.shape[0])
+                        elif cur_latent.ndim == 2:
+                            n_time = int(cur_latent.shape[1])
+                    logger.info(
+                        "[VoxCPM stream] Stage-%s received latent chunk (key=%s, finished=%s, "
+                        "chunk_time_patches=%s, chunk_index=%s, inbox_depth=%s)",
+                        stage_id,
+                        connector_get_key,
+                        payload_data.get("finished", False),
+                        n_time,
+                        chunk_count,
+                        len(self._latent_chunk_inbox[external_req_id]),
+                    )
+                    # Keep polling SHM while Stage0 still produces chunks; do not wait for schedule().
+                    if not payload_data.get("finished", False):
+                        self._pending_load_reqs.append(request)
+                else:
+                    new_ids = payload_data.get("code_predictor_codes", [])
+                    request.prompt_token_ids = new_ids
+                    request.additional_information = {}
+                    if "left_context_size" in payload_data:
+                        request.additional_information["left_context_size"] = payload_data["left_context_size"]
+                    request.num_computed_tokens = 0
+
+                    if not new_ids and not payload_data.get("finished"):
+                        return True
 
             # Mark as finished for consumption
             self._finished_load_reqs.add(req_id)
@@ -207,11 +279,11 @@ class OmniChunkTransferAdapter(OmniTransferAdapterBase):
         pooling_output = task["pooling_output"]
         request = task["request"]
         is_finished = task["is_finished"]
+        cleanup_after_send = bool(task.get("cleanup_after_send", False))
         stage_id = self.connector.stage_id
         next_stage_id = stage_id + 1
         request_id = request.external_req_id
         chunk_id = self.put_req_chunk[request_id]
-        connector_put_key = f"{request_id}_{stage_id}_{chunk_id}"
         # Process payload in save_loop thread
         payload_data = None
         if self.custom_process_next_stage_input_func:
@@ -227,24 +299,44 @@ class OmniChunkTransferAdapter(OmniTransferAdapterBase):
                 logger.error(f"Failed to use custom_process_input_func for payload extraction: {e}")
 
         if not payload_data:
+            if cleanup_after_send:
+                self.cleanup(request.request_id, getattr(request, "external_req_id", None))
             return
 
-        success, size, metadata = self.connector.put(
-            from_stage=str(stage_id),
-            to_stage=str(next_stage_id),
-            put_key=connector_put_key,
-            data=payload_data,
+        payload_list: list[dict[str, Any]] = (
+            payload_data if isinstance(payload_data, list) else [payload_data]
         )
-
-        if success:
-            self.put_req_chunk[request_id] += 1
-            logger.debug(f"[Stage-{stage_id}] Sent {connector_put_key}")
+        sent = 0
+        for idx, one_payload in enumerate(payload_list):
+            put_key = f"{request_id}_{stage_id}_{chunk_id + idx}"
+            success, size, metadata = self.connector.put(
+                from_stage=str(stage_id),
+                to_stage=str(next_stage_id),
+                put_key=put_key,
+                data=one_payload,
+            )
+            if success:
+                sent += 1
+                if one_payload and one_payload.get("latent_audio_feat") is not None:
+                    logger.info(
+                        "[VoxCPM stream] Stage-%s sent latent chunk %s (key=%s)",
+                        stage_id,
+                        chunk_id + idx,
+                        put_key,
+                    )
+                else:
+                    logger.debug(f"[Stage-{stage_id}] Sent {put_key}")
+        if sent > 0:
+            self.put_req_chunk[request_id] += sent
 
         if is_finished:
             self.code_prompt_token_ids.pop(request_id, None)
             cached_ic = getattr(self, "_cached_ic", None)
             if cached_ic is not None:
                 cached_ic.pop(request_id, None)
+
+        if cleanup_after_send:
+            self.cleanup(request.request_id, getattr(request, "external_req_id", None))
 
     ########################################################################
     # Cleanup
@@ -278,6 +370,7 @@ class OmniChunkTransferAdapter(OmniTransferAdapterBase):
 
         self.put_req_chunk.pop(external_req_id, None)
         self.request_payload.pop(external_req_id, None)
+        self._latent_chunk_inbox.pop(external_req_id, None)
         self.code_prompt_token_ids.pop(external_req_id, None)
 
         cached_ic = getattr(self, "_cached_ic", None)
@@ -362,6 +455,18 @@ class OmniChunkTransferAdapter(OmniTransferAdapterBase):
                     # of schedule, but have not scheduled
                     continue
                 if request.request_id in self.finished_requests:
+                    continue
+                # Buffered latent (VoxCPM): another chunk already in inbox; schedule VAE without SHM wait.
+                if (
+                    self.connector.stage_id != 0
+                    and self.model_mode != "ar"
+                    and self._has_latent_inbox(request)
+                ):
+                    ext = getattr(request, "external_req_id", None) or request.request_id
+                    q = self._latent_chunk_inbox.get(ext)
+                    if q:
+                        request.additional_information = dict(q[0])
+                    self.requests_with_ready_chunks.add(request.request_id)
                     continue
                 # Requests that waiting for chunk
                 self.load_async(request)
