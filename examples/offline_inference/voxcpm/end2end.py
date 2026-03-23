@@ -15,7 +15,8 @@ from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm_omni import Omni
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-DEFAULT_STAGE_CONFIG = REPO_ROOT / "vllm_omni" / "model_executor" / "stage_configs" / "voxcpm.yaml"
+# Sync ``Omni.generate`` uses sequential stage handoff; use non-async_chunk config by default.
+DEFAULT_STAGE_CONFIG = REPO_ROOT / "vllm_omni" / "model_executor" / "stage_configs" / "voxcpm_no_async_chunk.yaml"
 
 
 def _build_prompt(args) -> dict[str, Any]:

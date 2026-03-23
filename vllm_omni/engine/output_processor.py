@@ -124,6 +124,14 @@ class OmniRequestState(RequestState):
                         elif k == "sr":
                             # Sample rate is a constant scalar, keep last value.
                             self.mm_accumulated[k] = v[-1]
+                        elif k in (
+                            "latent_audio_feat",
+                            "latent_stream_continue",
+                            "latent_stream_gen_exhausted",
+                            "latent",
+                        ):
+                            # Streaming latent steps have incompatible tensor shapes; do not cat(dim=0).
+                            self.mm_accumulated[k] = v[-1]
                         else:
                             self.mm_accumulated[k] = torch.cat(v, dim=0)
                     except Exception:
