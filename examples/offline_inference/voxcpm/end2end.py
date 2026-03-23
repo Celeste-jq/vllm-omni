@@ -41,7 +41,7 @@ def _save_wav(output_dir: Path, request_id: str, mm: dict) -> None:
     print(f"Saved: {out_wav}")
 
 
-def cmd_synthesize(args) -> list[dict]:
+def _build_synthesize_input(args) -> list[dict]:
     additional_information = {
         "text": [args.text],
         "cfg_value": [args.cfg_value],
@@ -56,7 +56,7 @@ def cmd_synthesize(args) -> list[dict]:
     }]
 
 
-def cmd_clone(args) -> list[dict]:
+def _build_clone_input(args) -> list[dict]:
     additional_information = {
         "text": [args.text],
         "ref_audio": [args.prompt_audio],
@@ -73,7 +73,7 @@ def cmd_clone(args) -> list[dict]:
     }]
 
 
-def cmd_batch(args) -> list[dict]:
+def _build_batch_input(args) -> list[dict]:
     inputs = []
     
     if args.jsonl_file:
@@ -291,18 +291,18 @@ def main(args) -> None:
     if args.text:
         if args.prompt_audio:
             print(f"Mode: Voice cloning")
-            inputs = cmd_clone(args)
+            inputs = _build_clone_input(args)
         else:
             print(f"Mode: Single text synthesis")
-            inputs = cmd_synthesize(args)
+            inputs = _build_synthesize_input(args)
     elif args.jsonl_file:
         print(f"Mode: Batch processing from JSONL file")
-        inputs = cmd_batch(args)
+        inputs = _build_batch_input(args)
     else:
         print(f"Mode: Batch processing from text file")
         if args.prompt_audio:
             print(f"Voice cloning: enabled")
-        inputs = cmd_batch(args)
+        inputs = _build_batch_input(args)
 
     print(f"Total requests: {len(inputs)}")
 
