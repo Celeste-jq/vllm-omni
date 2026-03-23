@@ -10,6 +10,7 @@ from vllm.transformers_utils.config import get_config, get_hf_file_to_dict
 from vllm.transformers_utils.repo_utils import file_or_path_exists
 
 from vllm_omni.config.yaml_util import create_config, load_yaml_config, merge_configs
+from vllm_omni.diffusion.utils.wan_native import has_wan22_native_t2v_remote_layout
 from vllm_omni.entrypoints.stage_utils import _to_dict
 from vllm_omni.platforms import current_omni_platform
 
@@ -186,6 +187,11 @@ def resolve_model_config_path(model: str) -> str:
         ValueError: If model_type cannot be determined
         FileNotFoundError: If no stage config file exists for the model type
     """
+    # WAN native T2V checkpoint layout does not have stage config yaml by model_type.
+    # Return None so caller can fall back to default diffusion stage config.
+    if has_wan22_native_t2v_remote_layout(model):
+        return None
+
     # Try to get config from standard transformers format first
     try:
         hf_config = get_config(model, trust_remote_code=True)

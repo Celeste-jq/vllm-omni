@@ -4,6 +4,8 @@ from functools import lru_cache
 from vllm.logger import init_logger
 from vllm.transformers_utils.config import get_hf_file_to_dict
 
+from vllm_omni.diffusion.utils.wan_native import has_wan22_native_t2v_remote_layout
+
 logger = init_logger(__name__)
 
 
@@ -72,6 +74,6 @@ def is_diffusion_model(model_name: str) -> bool:
     except Exception as e:
         logger.debug("Failed to load diffusers config via DiffusionPipeline: %s", e)
 
-        # Bagel is not a diffusers pipeline (no model_index.json), but is still a
-        # diffusion-style model in vllm-omni. Detect it via config.json.
-    return _looks_like_bagel(model_name)
+    # Bagel and WAN native T2V are not standard diffusers pipelines
+    # (no model_index.json), but should still be treated as diffusion models.
+    return _looks_like_bagel(model_name) or has_wan22_native_t2v_remote_layout(model_name)

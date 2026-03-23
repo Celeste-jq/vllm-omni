@@ -27,6 +27,11 @@ from vllm_omni.diffusion.models.schedulers import FlowUniPCMultistepScheduler
 from vllm_omni.diffusion.models.wan2_2.wan2_2_transformer import WanTransformer3DModel
 from vllm_omni.diffusion.profiler.diffusion_pipeline_profiler import DiffusionPipelineProfilerMixin
 from vllm_omni.diffusion.request import OmniDiffusionRequest
+from vllm_omni.diffusion.utils.wan_native import (
+    has_wan22_native_t2v_remote_layout,
+    is_local_wan22_native_t2v_layout,
+    prepare_local_wan22_native_t2v_for_vllm,
+)
 from vllm_omni.inputs.data import OmniTextPrompt
 from vllm_omni.platforms import current_omni_platform
 
@@ -204,6 +209,15 @@ class Wan22Pipeline(nn.Module, CFGParallelMixin, ProgressBarMixin, DiffusionPipe
         dtype = getattr(od_config, "dtype", torch.bfloat16)
 
         model = od_config.model
+        if isinstance(model, str) and os.path.isdir(model) and is_local_wan22_native_t2v_layout(model):
+            logger.info("Detected WAN native T2V checkpoint layout, preparing vLLM-Omni compatible assets...")
+            model = prepare_local_wan22_native_t2v_for_vllm(model)
+            self.od_config.model = model
+        elif isinstance(model, str) and not os.path.isdir(model) and has_wan22_native_t2v_remote_layout(model):
+            raise ValueError(
+                "WAN native T2V repo IDs are detected, but automatic remote adaptation is not supported. "
+                "Please download the model to a local directory first, then pass that local path to --model."
+            )
         local_files_only = os.path.exists(model)
 
         # Read model_index.json to detect expand_timesteps mode (for TI2V-5B)

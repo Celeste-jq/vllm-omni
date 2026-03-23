@@ -29,6 +29,23 @@ python text_to_video.py \
   --output t2v_out.mp4
 ```
 
+### Wan2.2 Native Checkpoint (non-Diffusers, local path)
+
+`Wan-AI/Wan2.2-T2V-A14B` is a native WAN layout (`high_noise_model/`, `low_noise_model/`, `models_t5...pth`, `Wan2.x_VAE.pth`).
+vLLM-Omni can adapt this layout when you pass a **local directory**:
+
+```bash
+python text_to_video.py \
+  --model /path/to/Wan2.2-T2V-A14B \
+  --prompt "A cinematic drone shot above snowy mountains at sunrise." \
+  --height 480 --width 832 --num-frames 33 \
+  --num-inference-steps 20 \
+  --tensor-parallel-size 4 \
+  --output wan_native_t2v.mp4
+```
+
+> Note: remote repo IDs for native WAN checkpoints are not adapted automatically. Download to local path first.
+
 LTX2 example:
 
 ```bash
@@ -104,7 +121,7 @@ python text_to_video.py \
 
 ### Common
 
-- `--model`: Diffusers model ID or local path.
+- `--model`: Diffusers model ID or local path. WAN native checkpoints require local path.
 - `--prompt`: text description (string).
 - `--height/--width`: output resolution. Default depends on model.
 - `--num-frames`: number of frames. Default depends on model.

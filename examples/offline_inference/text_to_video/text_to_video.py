@@ -54,7 +54,9 @@ def parse_args() -> argparse.Namespace:
         default="Wan-AI/Wan2.2-T2V-A14B-Diffusers",
         help="Diffusers model ID or local path. "
         "Examples: Wan-AI/Wan2.2-T2V-A14B-Diffusers, "
-        "hunyuanvideo-community/HunyuanVideo-1.5-480p_t2v",
+        "hunyuanvideo-community/HunyuanVideo-1.5-480p_t2v. "
+        "For WAN native checkpoints (e.g. Wan-AI/Wan2.2-T2V-A14B), "
+        "pass a local directory path.",
     )
     parser.add_argument("--prompt", default="A serene lakeside sunrise with mist over the water.", help="Text prompt.")
     parser.add_argument("--negative-prompt", default="", help="Negative prompt (Wan2.2 only).")
