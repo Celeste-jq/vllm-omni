@@ -236,6 +236,7 @@ Examples:
         default=4096,
         help="Maximum generated token length.",
     )
+
     parser.add_argument(
         "--stage-init-timeout",
         type=int,
@@ -247,6 +248,7 @@ Examples:
         action="store_true",
         help="Enable vLLM Omni stats logging.",
     )
+
     args = parser.parse_args()
 
     if not args.model:
@@ -318,9 +320,9 @@ def main(args) -> None:
         try:
             print(f"\nProcessing {i}/{len(inputs)}...")
             for stage_outputs in omni.generate([prompt]):
-                for output in stage_outputs.request_output:
-                    _save_wav(output_dir, output.request_id, output.outputs[0].multimodal_output)
-                    saved_count += 1
+                output = stage_outputs.request_output
+                _save_wav(output_dir, output.request_id, output.outputs[0].multimodal_output)
+                saved_count += 1
         except Exception as e:
             print(f"Failed on {i}: {e}")
 
