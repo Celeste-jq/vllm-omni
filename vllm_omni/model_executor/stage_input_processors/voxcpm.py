@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import torch
 from vllm.inputs import TextPrompt
 
 from vllm_omni.inputs.data import OmniTokensPrompt
@@ -52,3 +53,64 @@ def latent2vae(
         )
 
     return vae_inputs
+
+
+def _tensorish_truthy(val: Any) -> bool:
+    if isinstance(val, torch.Tensor):
+        if val.numel() == 0:
+            return False
+        return bool(val.reshape(-1)[0].item())
+    return bool(val)
+
+
+def latent2vae_async_chunk(
+    transfer_manager: Any,
+    pooling_output: dict[str, Any] | None,
+    request: Any,
+    is_finished: bool = False,
+) -> dict[str, Any] | None:
+    """Stage-0 latent → stage-1 VAE under ``async_chunk`` (connector payload)."""
+    del transfer_manager
+    request_id = getattr(request, "external_req_id", None) or getattr(request, "request_id", "")
+    finished_request = bool(is_finished)
+    if callable(getattr(request, "is_finished", None)):
+        finished_request = finished_request or bool(request.is_finished())
+    if not isinstance(pooling_output, dict):
+        if finished_request:
+            return {
+                "code_predictor_codes": [0],
+                "finished": True,
+            }
+        return None
+
+    latent = pooling_output.get("latent_audio_feat")
+    if isinstance(latent, torch.Tensor) and latent.numel() == 0:
+        latent = None
+
+    cont = pooling_output.get("latent_stream_continue")
+    streaming_more = _tensorish_truthy(cont) if cont is not None else False
+    gen_ex = pooling_output.get("latent_stream_gen_exhausted")
+    gen_exhausted = _tensorish_truthy(gen_ex) if gen_ex is not None else False
+
+    if latent is None:
+        if finished_request or gen_exhausted:
+            return {
+                "code_predictor_codes": [0],
+                "finished": True,
+            }
+        return None
+
+    # Last chunk: no continuation flag (or explicit zero). ``gen_exhausted`` mirrors is_last on the
+    # latent generator (StopIteration is skipped because we pop the gen when is_last).
+    payload_finished = finished_request or not streaming_more or gen_exhausted
+    sr = pooling_output.get("sr")
+    out: dict[str, Any] = {
+        "code_predictor_codes": [0],
+        "latent_audio_feat": latent.detach().cpu().contiguous()
+        if isinstance(latent, torch.Tensor)
+        else latent,
+        "finished": bool(payload_finished),
+    }
+    if isinstance(sr, torch.Tensor):
+        out["sr"] = sr.detach().cpu().contiguous()
+    return out
