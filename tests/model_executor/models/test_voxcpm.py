@@ -12,7 +12,7 @@ from vllm_omni.model_executor.models.voxcpm.voxcpm import (
     _prepare_runtime_model_dir,
     VoxCPMForConditionalGeneration,
 )
-from vllm_omni.model_executor.stage_input_processors.voxcpm import latent2vae
+from vllm_omni.model_executor.stage_input_processors.voxcpm import latent2vae, latent2vae_async_chunk
 
 pytestmark = [pytest.mark.core_model, pytest.mark.cpu]
 
@@ -113,6 +113,43 @@ def test_audio_vae_prepare_latents_for_decode():
     prepared = decoder._prepare_latents_for_decode(latents)
 
     assert tuple(prepared.shape) == (1, 4, 6)
+
+
+def test_latent2vae_async_chunk_uses_omni_stream_flags():
+    class _Req:
+        external_req_id = "r1"
+
+        def is_finished(self):
+            return False
+
+    tm = SimpleNamespace()
+    latent = torch.ones(2, 3, dtype=torch.float32)
+    out = latent2vae_async_chunk(
+        transfer_manager=tm,
+        pooling_output={
+            "latent_audio_feat": latent,
+            "omni_stream_continue": torch.tensor(1, dtype=torch.int32),
+            "omni_stream_gen_exhausted": torch.tensor(0, dtype=torch.int32),
+        },
+        request=_Req(),
+        is_finished=False,
+    )
+    assert out is not None
+    assert out["finished"] is False
+    assert "latent_audio_feat" in out
+
+    out_last = latent2vae_async_chunk(
+        transfer_manager=tm,
+        pooling_output={
+            "latent_audio_feat": latent,
+            "omni_stream_continue": torch.tensor(0, dtype=torch.int32),
+            "omni_stream_gen_exhausted": torch.tensor(1, dtype=torch.int32),
+        },
+        request=_Req(),
+        is_finished=False,
+    )
+    assert out_last is not None
+    assert out_last["finished"] is True
 
 
 def test_latent2vae_wraps_stage_outputs():

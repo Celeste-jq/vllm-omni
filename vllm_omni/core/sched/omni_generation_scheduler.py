@@ -1,7 +1,6 @@
 import time
 from collections import defaultdict
 
-import torch
 from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.distributed.kv_events import KVEventBatch
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
@@ -17,6 +16,11 @@ from vllm.v1.metrics.perf import PerfStats
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 
+from vllm_omni.core.omni_streaming_keys import (
+    pooler_stream_continues,
+    pooler_stream_gen_exhausted,
+    pooler_stream_terminal,
+)
 from vllm_omni.core.sched.output import OmniCachedRequestData, OmniNewRequestData
 from vllm_omni.distributed.omni_connectors.transfer_adapter.chunk_transfer_adapter import (
     OmniChunkTransferAdapter,
@@ -24,39 +28,6 @@ from vllm_omni.distributed.omni_connectors.transfer_adapter.chunk_transfer_adapt
 from vllm_omni.outputs import OmniModelRunnerOutput
 
 logger = init_logger(__name__)
-
-
-def _pooler_latent_stream_continues(pooler: dict | None) -> bool:
-    if not isinstance(pooler, dict):
-        return False
-    c = pooler.get("latent_stream_continue")
-    if c is None:
-        return False
-    if isinstance(c, torch.Tensor):
-        if c.numel() == 0:
-            return False
-        return bool(c.reshape(-1)[0].item() != 0)
-    return bool(c)
-
-
-def _pooler_latent_stream_terminal(pooler: dict | None) -> bool:
-    if not isinstance(pooler, dict) or "latent_stream_continue" not in pooler:
-        return False
-    return not _pooler_latent_stream_continues(pooler)
-
-
-def _pooler_latent_gen_exhausted(pooler: dict | None) -> bool:
-    """True after ``iter_latent_chunks`` hits StopIteration (empty tail step)."""
-    if not isinstance(pooler, dict):
-        return False
-    g = pooler.get("latent_stream_gen_exhausted")
-    if g is None:
-        return False
-    if isinstance(g, torch.Tensor):
-        if g.numel() == 0:
-            return False
-        return bool(g.reshape(-1)[0].item() != 0)
-    return bool(g)
 
 
 class OmniGenerationScheduler(VLLMScheduler):
@@ -448,7 +419,7 @@ class OmniGenerationScheduler(VLLMScheduler):
             if (
                 self.chunk_transfer_adapter is not None
                 and isinstance(pooler_output, dict)
-                and _pooler_latent_stream_continues(pooler_output)
+                and pooler_stream_continues(pooler_output)
             ):
                 request.prompt_token_ids.append(0)
                 try:
@@ -469,12 +440,12 @@ class OmniGenerationScheduler(VLLMScheduler):
                 )
                 or (
                     self.chunk_transfer_adapter is not None
-                    and _pooler_latent_stream_terminal(pooler_output)
+                    and pooler_stream_terminal(pooler_output)
                     and request.num_computed_tokens >= len(request.prompt_token_ids)
                 )
                 or (
                     self.chunk_transfer_adapter is not None
-                    and _pooler_latent_gen_exhausted(pooler_output)
+                    and pooler_stream_gen_exhausted(pooler_output)
                 )
             ):
                 request.status = RequestStatus.FINISHED_STOPPED

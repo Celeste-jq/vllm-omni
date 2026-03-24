@@ -66,6 +66,21 @@ Generated audio is saved to `output_audio/` by default.
 - `--min-len`: minimum token length
 - `--max-new-tokens`: maximum token length
 
+## Omni async_chunk vs Qwen3-TTS (same transport, different Stage0 semantics)
+
+Both pipelines use `async_chunk: true`, [`OmniChunkTransferAdapter`](../../../vllm_omni/distributed/omni_connectors/transfer_adapter/chunk_transfer_adapter.py), `SharedMemoryConnector`, and a `custom_process_next_stage_input_func` to build the Stage0→Stage1 payload (`code_predictor_codes`, `finished`, plus modality-specific fields).
+
+| Aspect | Qwen3-TTS | VoxCPM |
+|--------|-----------|--------|
+| Stage0 `worker_type` | `ar` (connector merges payloads across AR steps) | `generation` (each chunk replaces `prompt_token_ids` for Stage1) |
+| Stage0 scheduler | `OmniARScheduler` | `OmniGenerationScheduler` |
+| What each Stage0 step produces | One speech-token frame (`audio_codes` in pooler) | One latent window from an internal iterator (`latent_audio_feat`) |
+| “More chunks?” signal | Implicit via AR decode until EOS | Explicit: `omni_stream_continue` / `omni_stream_gen_exhausted` (legacy: `latent_stream_*`) in pooler; see [`omni_streaming_keys.py`](../../../vllm_omni/core/omni_streaming_keys.py) |
+| Connector `codec_streaming` | `true` + frame windowing in [`talker2code2wav_async_chunk`](../../../vllm_omni/model_executor/stage_input_processors/qwen3_tts.py) | `false` — each chunk is a full latent for VAE ([`latent2vae_async_chunk`](../../../vllm_omni/model_executor/stage_input_processors/voxcpm.py)) |
+| Stage1 | Code2Wav | VAE decode (`trim_streaming_patch` trims overlap) |
+
+**Stage0→Stage1 payload contract (VoxCPM streaming):** `latent2vae_async_chunk` sends `latent_audio_feat`, optional `sr`, `code_predictor_codes: [0]`, and `finished` when the request is done, the stream no longer continues, or the generator is exhausted. Pooler flags are interpreted via `pooler_stream_continues` / `pooler_stream_gen_exhausted` (supports both `omni_*` and legacy `latent_stream_*` keys).
+
 ## Notes
 
 - This branch only keeps the split-stage `latent_generator -> vae` pipeline.

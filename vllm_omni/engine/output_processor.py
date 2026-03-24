@@ -128,6 +128,8 @@ class OmniRequestState(RequestState):
                             "latent_audio_feat",
                             "latent_stream_continue",
                             "latent_stream_gen_exhausted",
+                            "omni_stream_continue",
+                            "omni_stream_gen_exhausted",
                             "latent",
                         ):
                             # Streaming latent steps have incompatible tensor shapes; do not cat(dim=0).
