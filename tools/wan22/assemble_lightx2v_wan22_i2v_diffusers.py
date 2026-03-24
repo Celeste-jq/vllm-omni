@@ -64,9 +64,7 @@ def _load_shard_files_from_index(index_file: Path, role: str) -> tuple[Path, ...
 
     weight_map = payload.get("weight_map")
     if not isinstance(weight_map, dict) or not weight_map:
-        raise AssembleError(
-            f"Invalid {role} index file (missing/empty weight_map): {index_file}"
-        )
+        raise AssembleError(f"Invalid {role} index file (missing/empty weight_map): {index_file}")
 
     shard_names = sorted({str(v) for v in weight_map.values()})
     shard_paths: list[Path] = []
@@ -79,9 +77,7 @@ def _load_shard_files_from_index(index_file: Path, role: str) -> tuple[Path, ...
             shard_paths.append(shard_path)
 
     if missing:
-        raise AssembleError(
-            f"{role} index references missing shard file(s): " + ", ".join(missing)
-        )
+        raise AssembleError(f"{role} index references missing shard file(s): " + ", ".join(missing))
 
     if not shard_paths:
         raise AssembleError(f"No shard files referenced by {role} index: {index_file}")
@@ -161,8 +157,7 @@ def _ensure_clean_output(output_dir: Path, overwrite: bool) -> None:
     if output_dir.exists():
         if not overwrite:
             raise AssembleError(
-                f"Output directory already exists: {output_dir}. "
-                "Use --overwrite to remove and recreate it."
+                f"Output directory already exists: {output_dir}. Use --overwrite to remove and recreate it."
             )
         shutil.rmtree(output_dir)
     output_dir.mkdir(parents=True, exist_ok=False)
