@@ -21,11 +21,17 @@ from vllm.transformers_utils.config import get_hf_file_to_dict
 from vllm_omni.diffusion.data import OmniDiffusionConfig, TransformerConfig
 from vllm_omni.diffusion.diffusion_engine import DiffusionEngine
 from vllm_omni.diffusion.request import OmniDiffusionRequest
+from vllm_omni.diffusion.utils.wan_native import (
+    has_wan22_native_remote_candidate_layout,
+    infer_wan22_native_model_class,
+    load_wan22_native_transformer_config,
+)
 from vllm_omni.inputs.data import OmniDiffusionSamplingParams, OmniPromptType
 from vllm_omni.lora.request import LoRARequest
 from vllm_omni.outputs import OmniRequestOutput
 
 logger = init_logger(__name__)
+_WAN_NATIVE_HIGH_NOISE_CONFIG_PATH = "high_noise_model/config.json"
 
 
 def _weak_close_async_omni_diffusion(engine: DiffusionEngine, executor: ThreadPoolExecutor) -> None:
@@ -113,27 +119,40 @@ class AsyncOmniDiffusion:
             else:
                 raise FileNotFoundError("model_index.json not found")
         except (AttributeError, OSError, ValueError, FileNotFoundError):
-            cfg = get_hf_file_to_dict("config.json", od_config.model)
-            if cfg is None:
-                raise ValueError(f"Could not find config.json or model_index.json for model {od_config.model}")
-
-            od_config.tf_model_config = TransformerConfig.from_dict(cfg)
-            model_type = cfg.get("model_type")
-            architectures = cfg.get("architectures") or []
-            # Bagel/NextStep models don't have a model_index.json, so we set the pipeline class name manually
-            if model_type == "bagel" or "BagelForConditionalGeneration" in architectures:
-                od_config.model_class_name = "BagelPipeline"
-                od_config.tf_model_config = TransformerConfig()
-                od_config.update_multimodal_support()
-            elif model_type == "nextstep":
+            if has_wan22_native_remote_candidate_layout(od_config.model):
+                native_tf_cfg = load_wan22_native_transformer_config(od_config.model)
+                if native_tf_cfg is None:
+                    raise ValueError(
+                        f"Detected WAN native layout for {od_config.model}, "
+                        f"but cannot load {_WAN_NATIVE_HIGH_NOISE_CONFIG_PATH}"
+                    )
                 if od_config.model_class_name is None:
-                    od_config.model_class_name = "NextStep11Pipeline"
-                od_config.tf_model_config = TransformerConfig()
+                    od_config.model_class_name = infer_wan22_native_model_class(od_config.model, native_tf_cfg)
+                od_config.tf_model_config = TransformerConfig.from_dict(native_tf_cfg)
                 od_config.update_multimodal_support()
-            elif architectures and len(architectures) == 1:
-                od_config.model_class_name = architectures[0]
+                logger.info("Detected WAN native checkpoint layout: %s", od_config.model)
             else:
-                raise
+                cfg = get_hf_file_to_dict("config.json", od_config.model)
+                if cfg is None:
+                    raise ValueError(f"Could not find config.json or model_index.json for model {od_config.model}")
+
+                od_config.tf_model_config = TransformerConfig.from_dict(cfg)
+                model_type = cfg.get("model_type")
+                architectures = cfg.get("architectures") or []
+                # Bagel/NextStep models don't have a model_index.json, so we set the pipeline class name manually
+                if model_type == "bagel" or "BagelForConditionalGeneration" in architectures:
+                    od_config.model_class_name = "BagelPipeline"
+                    od_config.tf_model_config = TransformerConfig()
+                    od_config.update_multimodal_support()
+                elif model_type == "nextstep":
+                    if od_config.model_class_name is None:
+                        od_config.model_class_name = "NextStep11Pipeline"
+                    od_config.tf_model_config = TransformerConfig()
+                    od_config.update_multimodal_support()
+                elif architectures and len(architectures) == 1:
+                    od_config.model_class_name = architectures[0]
+                else:
+                    raise
 
         if cfg_kv_collect_func is not None:
             od_config.cfg_kv_collect_func = cfg_kv_collect_func

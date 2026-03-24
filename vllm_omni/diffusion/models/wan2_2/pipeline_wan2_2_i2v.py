@@ -32,6 +32,11 @@ from vllm_omni.diffusion.models.wan2_2.pipeline_wan2_2 import (
 )
 from vllm_omni.diffusion.profiler.diffusion_pipeline_profiler import DiffusionPipelineProfilerMixin
 from vllm_omni.diffusion.request import OmniDiffusionRequest
+from vllm_omni.diffusion.utils.wan_native import (
+    is_local_wan22_native_candidate_layout,
+    looks_like_wan22_native_checkpoint,
+    prepare_local_wan22_native_for_vllm,
+)
 from vllm_omni.inputs.data import OmniTextPrompt
 from vllm_omni.platforms import current_omni_platform
 
@@ -165,6 +170,15 @@ class Wan22I2VPipeline(
         dtype = getattr(od_config, "dtype", torch.bfloat16)
 
         model = od_config.model
+        if is_local_wan22_native_candidate_layout(model):
+            model = prepare_local_wan22_native_for_vllm(model, prefer_model_class_name="WanImageToVideoPipeline")
+            od_config.model = model
+            logger.info("WAN native checkpoint adapted to local diffusers layout: %s", model)
+        elif looks_like_wan22_native_checkpoint(model) and not os.path.isdir(model):
+            raise ValueError(
+                "WAN native checkpoints must be provided as a local directory path. "
+                "Please download the repository first and set --model to the local path."
+            )
         local_files_only = os.path.exists(model)
 
         # Set up weights sources for transformer(s)
@@ -196,29 +210,51 @@ class Wan22I2VPipeline(
             )
 
         # Text encoder
-        self.tokenizer = AutoTokenizer.from_pretrained(model, subfolder="tokenizer", local_files_only=local_files_only)
-        self.text_encoder = UMT5EncoderModel.from_pretrained(
-            model, subfolder="text_encoder", torch_dtype=dtype, local_files_only=local_files_only
-        ).to(self.device)
+        if local_files_only:
+            tokenizer_path = os.path.join(model, "tokenizer")
+            text_encoder_path = os.path.join(model, "text_encoder")
+            self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, local_files_only=True)
+            self.text_encoder = UMT5EncoderModel.from_pretrained(
+                text_encoder_path, torch_dtype=dtype, local_files_only=True
+            ).to(self.device)
+        else:
+            self.tokenizer = AutoTokenizer.from_pretrained(model, subfolder="tokenizer", local_files_only=False)
+            self.text_encoder = UMT5EncoderModel.from_pretrained(
+                model, subfolder="text_encoder", torch_dtype=dtype, local_files_only=False
+            ).to(self.device)
 
         # Image encoder (CLIP) - optional, for Wan2.1-style I2V
         self.has_image_encoder = "image_encoder" in model_index and model_index["image_encoder"][0] is not None
 
         if self.has_image_encoder:
-            self.image_processor = CLIPImageProcessor.from_pretrained(
-                model, subfolder="image_processor", local_files_only=local_files_only
-            )
-            self.image_encoder = CLIPVisionModel.from_pretrained(
-                model, subfolder="image_encoder", torch_dtype=dtype, local_files_only=local_files_only
-            ).to(self.device)
+            if local_files_only:
+                image_processor_path = os.path.join(model, "image_processor")
+                image_encoder_path = os.path.join(model, "image_encoder")
+                self.image_processor = CLIPImageProcessor.from_pretrained(image_processor_path, local_files_only=True)
+                self.image_encoder = CLIPVisionModel.from_pretrained(
+                    image_encoder_path, torch_dtype=dtype, local_files_only=True
+                ).to(self.device)
+            else:
+                self.image_processor = CLIPImageProcessor.from_pretrained(
+                    model, subfolder="image_processor", local_files_only=False
+                )
+                self.image_encoder = CLIPVisionModel.from_pretrained(
+                    model, subfolder="image_encoder", torch_dtype=dtype, local_files_only=False
+                ).to(self.device)
         else:
             self.image_processor = None
             self.image_encoder = None
 
         # VAE
-        self.vae = DistributedAutoencoderKLWan.from_pretrained(
-            model, subfolder="vae", torch_dtype=torch.float32, local_files_only=local_files_only
-        ).to(self.device)
+        if local_files_only:
+            vae_path = os.path.join(model, "vae")
+            self.vae = DistributedAutoencoderKLWan.from_pretrained(
+                vae_path, torch_dtype=torch.float32, local_files_only=True
+            ).to(self.device)
+        else:
+            self.vae = DistributedAutoencoderKLWan.from_pretrained(
+                model, subfolder="vae", torch_dtype=torch.float32, local_files_only=False
+            ).to(self.device)
 
         # Transformers (weights loaded via load_weights)
         # Load config from model directory or HF Hub to get correct in_channels for I2V models

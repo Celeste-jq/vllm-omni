@@ -4,6 +4,8 @@ from functools import lru_cache
 from vllm.logger import init_logger
 from vllm.transformers_utils.config import get_hf_file_to_dict
 
+from vllm_omni.diffusion.utils.wan_native import has_wan22_native_remote_candidate_layout
+
 logger = init_logger(__name__)
 
 
@@ -60,7 +62,12 @@ def is_diffusion_model(model_name: str) -> bool:
     except Exception as e:
         logger.debug("Failed to check model_index.json via get_hf_file_to_dict: %s", e)
 
-    # Strategy 3: Try the standard diffusers approach (may fail due to import issues)
+    # Strategy 3: Handle WAN native checkpoints (non-diffusers layout).
+    if has_wan22_native_remote_candidate_layout(model_name):
+        logger.debug("Detected WAN native checkpoint layout")
+        return True
+
+    # Strategy 4: Try the standard diffusers approach (may fail due to import issues)
     # This is last because it requires importing diffusers/xformers/flash_attn
     # which may have compatibility issues
     try:

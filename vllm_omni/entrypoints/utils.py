@@ -10,6 +10,7 @@ from vllm.transformers_utils.config import get_config, get_hf_file_to_dict
 from vllm.transformers_utils.repo_utils import file_or_path_exists
 
 from vllm_omni.config.yaml_util import create_config, load_yaml_config, merge_configs
+from vllm_omni.diffusion.utils.wan_native import has_wan22_native_remote_candidate_layout
 from vllm_omni.entrypoints.stage_utils import _to_dict
 from vllm_omni.platforms import current_omni_platform
 
@@ -169,7 +170,7 @@ def _convert_dataclasses_to_dict(obj: Any) -> Any:
     return obj
 
 
-def resolve_model_config_path(model: str) -> str:
+def resolve_model_config_path(model: str) -> str | None:
     """Resolve the stage config file path from the model name.
 
     Resolves stage configuration path based on the model type and device type.
@@ -211,6 +212,11 @@ def resolve_model_config_path(model: str) -> str:
             except Exception as e:
                 raise ValueError(f"Failed to read config.json for model: {model}. Error: {e}") from e
         else:
+            # WAN native checkpoints (non-diffusers) do not expose root-level
+            # config.json/model_index.json. Diffusion engine can bootstrap from
+            # high_noise_model/config.json, so skip stage config resolution here.
+            if has_wan22_native_remote_candidate_layout(model):
+                return None
             raise ValueError(
                 f"Could not determine model_type for model: {model}. "
                 f"Model is not in standard transformers format and does not have model_index.json. "
