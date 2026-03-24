@@ -5,6 +5,7 @@ from typing import Any
 import torch
 from vllm.inputs import TextPrompt
 
+from vllm_omni.core.omni_streaming_keys import pooler_stream_continues, pooler_stream_gen_exhausted
 from vllm_omni.inputs.data import OmniTokensPrompt
 
 
@@ -55,14 +56,6 @@ def latent2vae(
     return vae_inputs
 
 
-def _tensorish_truthy(val: Any) -> bool:
-    if isinstance(val, torch.Tensor):
-        if val.numel() == 0:
-            return False
-        return bool(val.reshape(-1)[0].item())
-    return bool(val)
-
-
 def latent2vae_async_chunk(
     transfer_manager: Any,
     pooling_output: dict[str, Any] | None,
@@ -87,10 +80,8 @@ def latent2vae_async_chunk(
     if isinstance(latent, torch.Tensor) and latent.numel() == 0:
         latent = None
 
-    cont = pooling_output.get("latent_stream_continue")
-    streaming_more = _tensorish_truthy(cont) if cont is not None else False
-    gen_ex = pooling_output.get("latent_stream_gen_exhausted")
-    gen_exhausted = _tensorish_truthy(gen_ex) if gen_ex is not None else False
+    streaming_more = pooler_stream_continues(pooling_output)
+    gen_exhausted = pooler_stream_gen_exhausted(pooling_output)
 
     if latent is None:
         if finished_request or gen_exhausted:

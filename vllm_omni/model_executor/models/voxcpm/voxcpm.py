@@ -857,12 +857,12 @@ class VoxCPMForConditionalGeneration(nn.Module):
                     "sr": [torch.tensor(sample_rate, dtype=torch.int32) for _ in infos],
                 }
                 if async_chunk and self.model_stage in self._LATENT_STAGES:
-                    mm_empty["latent_stream_continue"] = [
-                        torch.tensor(0, dtype=torch.int32) for _ in infos
-                    ]
-                    mm_empty["latent_stream_gen_exhausted"] = [
-                        torch.tensor(0, dtype=torch.int32) for _ in infos
-                    ]
+                    z_cont = [torch.tensor(0, dtype=torch.int32) for _ in infos]
+                    z_ex = [torch.tensor(0, dtype=torch.int32) for _ in infos]
+                    mm_empty["omni_stream_continue"] = z_cont
+                    mm_empty["latent_stream_continue"] = z_cont
+                    mm_empty["omni_stream_gen_exhausted"] = z_ex
+                    mm_empty["latent_stream_gen_exhausted"] = z_ex
                 return OmniOutput(
                     text_hidden_states=None,
                     multimodal_outputs=mm_empty,
@@ -971,8 +971,10 @@ class VoxCPMForConditionalGeneration(nn.Module):
         output_key = "latent_audio_feat" if self.model_stage in self._LATENT_STAGES else "model_outputs"
         mm: dict[str, Any] = {output_key: outputs, "sr": sample_rates}
         if stream_continues is not None:
+            mm["omni_stream_continue"] = stream_continues
             mm["latent_stream_continue"] = stream_continues
             assert gen_exhausted_flags is not None
+            mm["omni_stream_gen_exhausted"] = gen_exhausted_flags
             mm["latent_stream_gen_exhausted"] = gen_exhausted_flags
         return OmniOutput(
             text_hidden_states=None,
