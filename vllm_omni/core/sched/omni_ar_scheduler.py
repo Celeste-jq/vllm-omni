@@ -22,6 +22,7 @@ from vllm_omni.core.sched.output import OmniSchedulerOutput
 from vllm_omni.distributed.omni_connectors.transfer_adapter.chunk_transfer_adapter import (
     OmniChunkTransferAdapter,
 )
+from vllm_omni.model_executor.stage_input_processors.voxcpm import voxcpm_pooler_streaming_has_more
 
 logger = init_logger(__name__)
 
@@ -277,6 +278,31 @@ class OmniARScheduler(VLLMScheduler):
             status_before_stop = request.status
             finish_reason = None
             routed_experts = None
+            cleanup_chunk_deferred = False
+
+            # VoxCPM latent chunk streaming (Stage0, AR scheduler): extend prompt while more chunks remain.
+            adapter_stage_id_pre = (
+                getattr(self.chunk_transfer_adapter.connector, "stage_id", None)
+                if self.chunk_transfer_adapter is not None
+                else None
+            )
+            _vox_more = (
+                voxcpm_pooler_streaming_has_more(pooler_output)
+                if isinstance(pooler_output, dict)
+                else None
+            )
+            if (
+                self.chunk_transfer_adapter is not None
+                and adapter_stage_id_pre == 0
+                and _vox_more is True
+            ):
+                request.prompt_token_ids.append(0)
+                try:
+                    request._all_token_ids.append(0)  # type: ignore[attr-defined]
+                except Exception:
+                    pass
+                if hasattr(request, "num_prompt_tokens"):
+                    request.num_prompt_tokens = len(request.prompt_token_ids)
 
             # Check for stop and update request status.
             if new_token_ids:
@@ -292,6 +318,30 @@ class OmniARScheduler(VLLMScheduler):
             if not stopped and self._process_kv_transfer_trigger(request, new_token_ids):
                 stopped = True
 
+            # async_chunk (align with OmniGenerationScheduler): Stage0 stops when prompt consumed;
+            # Stage1 stops when upstream finished and all latent windows are processed.
+            adapter_stage_id = (
+                getattr(self.chunk_transfer_adapter.connector, "stage_id", None)
+                if self.chunk_transfer_adapter is not None
+                else None
+            )
+            if not stopped and self.chunk_transfer_adapter is not None:
+                if (
+                    request.status == RequestStatus.FINISHED_STOPPED
+                    or (
+                        adapter_stage_id == 0
+                        and request.num_computed_tokens >= request.num_prompt_tokens
+                    )
+                    or (
+                        adapter_stage_id not in (None, 0)
+                        and request.request_id in self.chunk_transfer_adapter.finished_requests
+                        and request.num_computed_tokens >= len(request.prompt_token_ids)
+                    )
+                ):
+                    request.status = RequestStatus.FINISHED_STOPPED
+                    request.stop_reason = request.stop_reason
+                    stopped = True
+
             if stopped:
                 routed_experts = self._get_routed_experts(request)
 
@@ -301,6 +351,8 @@ class OmniARScheduler(VLLMScheduler):
                 finished = self._handle_stopped_request(request)
                 if finished:
                     kv_transfer_params = self._free_request(request)
+                    if self.chunk_transfer_adapter is not None:
+                        cleanup_chunk_deferred = True
                 if status_before_stop == RequestStatus.RUNNING:
                     stopped_running_reqs.add(request)
                 elif status_before_stop == RequestStatus.WAITING_FOR_CHUNK:
@@ -353,7 +405,17 @@ class OmniARScheduler(VLLMScheduler):
                     )
                 )
                 if self.chunk_transfer_adapter is not None:
-                    self.chunk_transfer_adapter.save_async(pooler_output, request)
+                    self.chunk_transfer_adapter.save_async(
+                        pooler_output,
+                        request,
+                        cleanup_after_send=cleanup_chunk_deferred,
+                    )
+                if (
+                    self.chunk_transfer_adapter is not None
+                    and not cleanup_chunk_deferred
+                    and getattr(self.chunk_transfer_adapter.connector, "stage_id", None) not in (None, 0)
+                ):
+                    self.chunk_transfer_adapter.after_latent_chunk_consumed(request)
             else:
                 # Invariant: EngineCore returns no partial prefill outputs.
                 assert not prompt_logprobs_tensors

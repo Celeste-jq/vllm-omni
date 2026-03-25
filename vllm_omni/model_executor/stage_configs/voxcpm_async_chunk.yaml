@@ -11,11 +11,11 @@ stage_args:
       dtype: bfloat16
       model_stage: latent_generator
       model_arch: VoxCPMForConditionalGeneration
-      worker_type: generation
-      scheduler_cls: vllm_omni.core.sched.omni_generation_scheduler.OmniGenerationScheduler
+      worker_type: ar
+      scheduler_cls: vllm_omni.core.sched.omni_ar_scheduler.OmniARScheduler
       enforce_eager: true
       trust_remote_code: true
-      async_scheduling: false
+      async_scheduling: true
       enable_prefix_caching: false
       engine_output_type: latent
       gpu_memory_utilization: 0.7
@@ -23,6 +23,14 @@ stage_args:
       max_num_batched_tokens: 4096
       max_model_len: 4096
       custom_process_next_stage_input_func: vllm_omni.model_executor.stage_input_processors.voxcpm.latent2vae_async_chunk
+    default_sampling_params:
+      temperature: 0.0
+      top_p: 1.0
+      top_k: -1
+      max_tokens: 4096
+      seed: 42
+      detokenize: false
+      repetition_penalty: 1.0
     final_output: false
     output_connectors:
       to_stage_1: voxcpm_shm
@@ -73,6 +81,9 @@ runtime:
       extra:
         shm_threshold_bytes: 65536
         latent_chunk_patches: 8
+        # Optional overlap window between adjacent latent chunks.
+        # 0 means no overlap (current default behavior).
+        latent_left_context_patches: 0
   edges:
     - from: 0
       to: 1

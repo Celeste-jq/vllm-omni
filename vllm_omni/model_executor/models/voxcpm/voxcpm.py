@@ -363,11 +363,31 @@ class _DirectVoxCPMAudioVAE:
         return latents
 
     @torch.no_grad()
-    def decode(self, latent_audio_feat: Any) -> torch.Tensor:
+    def decode(self, latent_audio_feat: Any, left_context_size: int = 0) -> torch.Tensor:
         latents = self._prepare_latents_for_decode(latent_audio_feat)
         device = next(self.audio_vae.parameters()).device
         audio = self.audio_vae.decode(latents.to(device=device, dtype=torch.float32))
-        return audio.squeeze(1).reshape(-1).detach().cpu().to(torch.float32)
+        wav = audio.squeeze(1).reshape(-1).detach().cpu().to(torch.float32)
+        # Optional trim for latent left-context streaming window.
+        if left_context_size > 0:
+            total_patches = int(latents.shape[-1])
+            if total_patches > 0 and wav.numel() > 0:
+                trim_samples = int((wav.numel() * left_context_size) / total_patches)
+                trim_samples = max(0, min(trim_samples, int(wav.numel())))
+                if trim_samples > 0:
+                    out_len = int(wav.numel()) - trim_samples
+                    logger.info(
+                        "[VoxCPM stream] Stage-1 VAE decode trim "
+                        "(left_context_patches=%s, total_latent_patches=%s, "
+                        "wav_samples_in=%s, trim_samples=%s, wav_samples_out=%s)",
+                        left_context_size,
+                        total_patches,
+                        int(wav.numel()),
+                        trim_samples,
+                        out_len,
+                    )
+                    wav = wav[trim_samples:]
+        return wav
 
 
 def _load_native_voxcpm_model(
@@ -574,13 +594,40 @@ class VoxCPMForConditionalGeneration(nn.Module):
         temp_prompt_wav = cls._write_temp_prompt_wav(waveform, sample_rate)
         return temp_prompt_wav, ref_text, temp_prompt_wav
 
-    def embed_input_ids(self, input_ids: torch.Tensor, **_: Any) -> torch.Tensor:
-        if input_ids.numel() == 0:
-            return torch.empty((0, 1), device=input_ids.device, dtype=torch.float32)
-        return torch.zeros((input_ids.shape[0], 1), device=input_ids.device, dtype=torch.float32)
+    def _latent_ar_hidden_size(self) -> int:
+        try:
+            return int(getattr(self.vllm_config.model_config.hf_text_config, "hidden_size", 1024))
+        except Exception:
+            return 1024
 
-    def compute_logits(self, hidden_states: torch.Tensor | OmniOutput, sampling_metadata: Any = None) -> None:
-        return None
+    def embed_input_ids(self, input_ids: torch.Tensor, **_: Any) -> torch.Tensor:
+        hs = self._latent_ar_hidden_size()
+        if input_ids.numel() == 0:
+            return torch.empty((0, hs), device=input_ids.device, dtype=torch.float32)
+        # AR runner expects full hidden dim; values are placeholders (native VoxCPM runs in forward()).
+        return torch.zeros((input_ids.shape[0], hs), device=input_ids.device, dtype=torch.float32)
+
+    def compute_logits(
+        self, hidden_states: torch.Tensor | OmniOutput, sampling_metadata: Any = None
+    ) -> torch.Tensor | None:
+        """Latent stage under AR scheduler: return degenerate logits so sampler emits a fixed token.
+
+        Real audio-side output is ``multimodal_outputs`` / pooler; this only advances AR bookkeeping.
+        """
+        if self.model_stage not in self._LATENT_STAGES:
+            return None
+        if not isinstance(hidden_states, torch.Tensor):
+            return None
+        n = hidden_states.shape[0]
+        mc = self.vllm_config.model_config
+        if callable(getattr(mc, "get_vocab_size", None)):
+            vocab = int(mc.get_vocab_size())
+        else:
+            vocab = int(getattr(getattr(mc, "hf_text_config", mc), "vocab_size", 32000))
+        logits = torch.full((n, vocab), -1e9, device=hidden_states.device, dtype=torch.float32)
+        # Always pick token id 0 (must not be EOS for typical configs).
+        logits[:, 0] = 0.0
+        return logits.to(dtype=hidden_states.dtype)
 
     @torch.no_grad()
     def forward(
@@ -592,7 +639,9 @@ class VoxCPMForConditionalGeneration(nn.Module):
         runtime_additional_information: list[dict[str, Any]] | None = None,
         **kwargs: Any,
     ) -> OmniOutput:
-        del input_ids, positions, intermediate_tensors, inputs_embeds, kwargs
+        # AR runner indexes ``hidden_states[logits_indices]``; provide a dummy tensor matching batch tokens.
+        num_tokens = int(input_ids.numel()) if input_ids is not None else 1
+        del positions, intermediate_tensors, inputs_embeds, kwargs
         self._ensure_model_loaded()
 
         infos = runtime_additional_information or [{}]
@@ -609,8 +658,10 @@ class VoxCPMForConditionalGeneration(nn.Module):
         else:
             texts = [self._extract_val(info, "text", "") for info in infos]
             if all(not text for text in texts):
+                hs = self._latent_ar_hidden_size()
+                dev = input_ids.device if input_ids is not None else torch.device("cpu")
                 return OmniOutput(
-                    text_hidden_states=None,
+                    text_hidden_states=torch.zeros((num_tokens, hs), device=dev, dtype=torch.float32),
                     multimodal_outputs={
                         "latent_audio_feat": [torch.zeros((0,), dtype=torch.float32) for _ in infos],
                         "sr": [torch.tensor(sample_rate, dtype=torch.int32) for _ in infos],
@@ -628,7 +679,8 @@ class VoxCPMForConditionalGeneration(nn.Module):
         for info in infos:
             if self.model_stage in self._VAE_STAGES:
                 latent_audio_feat = self._extract_val(info, "latent_audio_feat", None)
-                audio_tensor = self._pipeline.decode(latent_audio_feat)
+                left_context_size = int(self._extract_val(info, "left_context_size", 0) or 0)
+                audio_tensor = self._pipeline.decode(latent_audio_feat, left_context_size=left_context_size)
                 outputs.append(audio_tensor.float().cpu())
                 sample_rates.append(torch.tensor(sample_rate, dtype=torch.int32))
                 continue
@@ -716,8 +768,15 @@ class VoxCPMForConditionalGeneration(nn.Module):
             mm["voxcpm_streaming_continue"] = [
                 torch.tensor(1.0 if c else 0.0, dtype=torch.float32) for c in stream_continue
             ]
+        dev = input_ids.device if input_ids is not None else torch.device("cpu")
+        hs = self._latent_ar_hidden_size()
+        text_hs = (
+            torch.zeros((num_tokens, hs), device=dev, dtype=torch.float32)
+            if self.model_stage in self._LATENT_STAGES
+            else None
+        )
         return OmniOutput(
-            text_hidden_states=None,
+            text_hidden_states=text_hs,
             multimodal_outputs=mm,
         )
 
