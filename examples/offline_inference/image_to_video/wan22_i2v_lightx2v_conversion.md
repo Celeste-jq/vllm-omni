@@ -1,8 +1,5 @@
 # Wan2.2 I2V LightX2V Conversion
 
-Source <https://github.com/vllm-project/vllm-omni/blob/main/examples/offline_inference/image_to_video/wan22_i2v_lightx2v_conversion.md>.
-
-
 This guide shows how to use LightX2V Wan2.2 LoRAs with vLLM-Omni by **offline converting and assembling** a Diffusers-style model directory.
 
 As of **March 24, 2026**, this is the lowest-risk integration path on `upstream/main`.
