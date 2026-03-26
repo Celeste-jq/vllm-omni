@@ -5,7 +5,7 @@ stage_args:
   - stage_id: 0
     stage_type: llm
     runtime:
-      devices: "0"
+      devices: "1"
       max_batch_size: 1
     engine_args:
       dtype: bfloat16
@@ -38,7 +38,7 @@ stage_args:
   - stage_id: 1
     stage_type: llm
     runtime:
-      devices: "0"
+      devices: "1"
       max_batch_size: 1
     engine_args:
       dtype: float32
@@ -81,9 +81,6 @@ runtime:
       extra:
         shm_threshold_bytes: 65536
         latent_chunk_patches: 8
-        # Optional overlap window between adjacent latent chunks.
-        # 0 means no overlap (current default behavior).
-        latent_left_context_patches: 0
   edges:
     - from: 0
       to: 1

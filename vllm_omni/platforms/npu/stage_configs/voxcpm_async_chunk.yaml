@@ -80,9 +80,6 @@ runtime:
       extra:
         shm_threshold_bytes: 65536
         latent_chunk_patches: 8
-        # Optional overlap window between adjacent latent chunks.
-        # 0 means no overlap (current default behavior).
-        latent_left_context_patches: 0
   edges:
     - from: 0
       to: 1

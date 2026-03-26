@@ -12,7 +12,6 @@ logger = init_logger(__name__)
 
 # Default latent time-slices per SHM chunk (override via connector extra.latent_chunk_patches).
 DEFAULT_LATENT_CHUNK_PATCHES = 8
-DEFAULT_LATENT_LEFT_CONTEXT_PATCHES = 0
 
 
 def voxcpm_pooler_streaming_has_more(pooling_output: dict[str, Any]) -> bool | None:
@@ -103,19 +102,6 @@ def latent2vae_async_chunk(
         return None
 
     # Chunk streaming: one pooling_output per scheduler step → one SHM put per aggregated chunk.
-    # Optional latent left-context window (similar to codec left-context in Qwen3-TTS).
-    # When enabled, each payload carries [left_context + current_chunk], and
-    # left_context_size indicates how many leading patches belong to context.
-    connector = getattr(transfer_manager, "connector", None)
-    raw_cfg = getattr(connector, "config", {}) or {}
-    cfg = raw_cfg.get("extra", raw_cfg) if isinstance(raw_cfg, dict) else {}
-    chunk_size_cfg = int(cfg.get("latent_chunk_patches", DEFAULT_LATENT_CHUNK_PATCHES))
-    left_ctx_cfg = int(cfg.get("latent_left_context_patches", DEFAULT_LATENT_LEFT_CONTEXT_PATCHES))
-    if chunk_size_cfg <= 0:
-        chunk_size_cfg = DEFAULT_LATENT_CHUNK_PATCHES
-    if left_ctx_cfg < 0:
-        left_ctx_cfg = DEFAULT_LATENT_LEFT_CONTEXT_PATCHES
-
     if "voxcpm_streaming_continue" in pooling_output:
         latent = pooling_output.get("latent_audio_feat")
         sr = pooling_output.get("sr")
@@ -135,46 +121,16 @@ def latent2vae_async_chunk(
             latent = latent.detach().cpu().float().contiguous()
         else:
             latent = torch.tensor(latent, dtype=torch.float32)
-        current_chunk_patches = int(latent.shape[0]) if latent.ndim >= 1 else -1
-        if left_ctx_cfg > 0:
-            req_id = getattr(request, "external_req_id", None) or getattr(request, "request_id", "0")
-            payload_state = getattr(transfer_manager, "request_payload", None)
-            if payload_state is None:
-                payload_state = {}
-                transfer_manager.request_payload = payload_state
-            req_state = payload_state.get(req_id) or {}
-            prev_tail = req_state.get("_latent_tail")
-            if isinstance(prev_tail, torch.Tensor) and prev_tail.numel() > 0:
-                latent_window = torch.cat([prev_tail, latent], dim=0).contiguous()
-                left_context_size = int(prev_tail.shape[0])
-            else:
-                latent_window = latent
-                left_context_size = 0
-            keep = min(left_ctx_cfg, int(latent_window.shape[0]))
-            req_state["_latent_tail"] = latent_window[-keep:].contiguous() if keep > 0 else None
-            payload_state[req_id] = req_state
-            latent = latent_window
-        else:
-            left_context_size = 0
         n_patches = int(latent.shape[0]) if isinstance(latent, torch.Tensor) and latent.ndim >= 1 else -1
-        shape_str = tuple(latent.shape) if isinstance(latent, torch.Tensor) else ()
         logger.info(
-            "[VoxCPM stream] Stage-0 latent chunk send "
-            "(req=%s, current_patches=%s, window_patches=%s, shape=%s, "
-            "left_ctx_cfg=%s, left_context_size=%s, has_more=%s, shm_finished=%s)",
-            getattr(request, "external_req_id", None) or getattr(request, "request_id", "?"),
-            current_chunk_patches,
+            "[VoxCPM stream] Stage-0 latent chunk send (time_patches=%s, has_more=%s, shm_finished=%s)",
             n_patches,
-            shape_str,
-            left_ctx_cfg,
-            left_context_size,
             has_more,
             payload_finished,
         )
         return {
             "latent_audio_feat": latent,
             "sr": sr,
-            "left_context_size": left_context_size,
             "finished": payload_finished,
         }
 
@@ -196,7 +152,10 @@ def latent2vae_async_chunk(
     else:
         latent = torch.tensor(latent, dtype=torch.float32)
 
-    chunk_size = chunk_size_cfg
+    connector = getattr(transfer_manager, "connector", None)
+    cfg = (getattr(connector, "config", None) or {})
+    extra = cfg.get("extra", cfg) if isinstance(cfg, dict) else {}
+    chunk_size = int(extra.get("latent_chunk_patches", DEFAULT_LATENT_CHUNK_PATCHES))
 
     if latent.ndim == 3:
         t_len, _p, _d = latent.shape
@@ -210,7 +169,6 @@ def latent2vae_async_chunk(
                 {
                     "latent_audio_feat": chunk.contiguous(),
                     "sr": sr,
-                    "left_context_size": 0,
                     "finished": finished and end >= t_len,
                 }
             )
@@ -236,7 +194,6 @@ def latent2vae_async_chunk(
                 {
                     "latent_audio_feat": chunk,
                     "sr": sr,
-                    "left_context_size": 0,
                     "finished": finished and end >= t_len,
                 }
             )
@@ -250,4 +207,4 @@ def latent2vae_async_chunk(
         )
         return payloads
 
-    return [{"latent_audio_feat": latent, "sr": sr, "left_context_size": 0, "finished": True}]
+    return [{"latent_audio_feat": latent, "sr": sr, "finished": True}]

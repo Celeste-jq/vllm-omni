@@ -280,27 +280,37 @@ class OmniARScheduler(VLLMScheduler):
             routed_experts = None
             cleanup_chunk_deferred = False
 
-            # VoxCPM latent chunk streaming (Stage0, AR scheduler): extend prompt while more chunks remain.
+            # VoxCPM async_chunk Stage0 (latent_generator) under AR scheduler:
+            # extend prompt tokens while more latent chunks remain.
             adapter_stage_id_pre = (
                 getattr(self.chunk_transfer_adapter.connector, "stage_id", None)
                 if self.chunk_transfer_adapter is not None
                 else None
+            )
+            mc = self.vllm_config.model_config
+            is_voxcpm_latent_stage0 = (
+                self.chunk_transfer_adapter is not None
+                and adapter_stage_id_pre == 0
+                and getattr(mc, "async_chunk", False)
+                and getattr(mc, "engine_output_type", None) == "latent"
+                and getattr(mc, "model_stage", None) == "latent_generator"
+                and getattr(mc, "model_arch", None) == "VoxCPMForConditionalGeneration"
             )
             _vox_more = (
                 voxcpm_pooler_streaming_has_more(pooler_output)
                 if isinstance(pooler_output, dict)
                 else None
             )
-            if (
-                self.chunk_transfer_adapter is not None
-                and adapter_stage_id_pre == 0
-                and _vox_more is True
-            ):
-                request.prompt_token_ids.append(0)
-                try:
-                    request._all_token_ids.append(0)  # type: ignore[attr-defined]
-                except Exception:
-                    pass
+            if is_voxcpm_latent_stage0 and _vox_more is True:
+                # Ensure next step has required_tokens > 0:
+                # required_tokens = len(prompt_token_ids) - num_computed_tokens
+                target_len = int(getattr(request, "num_computed_tokens", 0)) + 1
+                while len(request.prompt_token_ids) < target_len:
+                    request.prompt_token_ids.append(0)
+                    try:
+                        request._all_token_ids.append(0)  # type: ignore[attr-defined]
+                    except Exception:
+                        pass
                 if hasattr(request, "num_prompt_tokens"):
                     request.num_prompt_tokens = len(request.prompt_token_ids)
 
@@ -318,8 +328,9 @@ class OmniARScheduler(VLLMScheduler):
             if not stopped and self._process_kv_transfer_trigger(request, new_token_ids):
                 stopped = True
 
-            # async_chunk (align with OmniGenerationScheduler): Stage0 stops when prompt consumed;
-            # Stage1 stops when upstream finished and all latent windows are processed.
+            # async_chunk stop rules (align with OmniGenerationScheduler behavior):
+            # - Stage0 stops when prompt tokens are consumed.
+            # - Stage1 stops when upstream finished and all latent windows are processed.
             adapter_stage_id = (
                 getattr(self.chunk_transfer_adapter.connector, "stage_id", None)
                 if self.chunk_transfer_adapter is not None

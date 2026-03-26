@@ -363,31 +363,11 @@ class _DirectVoxCPMAudioVAE:
         return latents
 
     @torch.no_grad()
-    def decode(self, latent_audio_feat: Any, left_context_size: int = 0) -> torch.Tensor:
+    def decode(self, latent_audio_feat: Any) -> torch.Tensor:
         latents = self._prepare_latents_for_decode(latent_audio_feat)
         device = next(self.audio_vae.parameters()).device
         audio = self.audio_vae.decode(latents.to(device=device, dtype=torch.float32))
-        wav = audio.squeeze(1).reshape(-1).detach().cpu().to(torch.float32)
-        # Optional trim for latent left-context streaming window.
-        if left_context_size > 0:
-            total_patches = int(latents.shape[-1])
-            if total_patches > 0 and wav.numel() > 0:
-                trim_samples = int((wav.numel() * left_context_size) / total_patches)
-                trim_samples = max(0, min(trim_samples, int(wav.numel())))
-                if trim_samples > 0:
-                    out_len = int(wav.numel()) - trim_samples
-                    logger.info(
-                        "[VoxCPM stream] Stage-1 VAE decode trim "
-                        "(left_context_patches=%s, total_latent_patches=%s, "
-                        "wav_samples_in=%s, trim_samples=%s, wav_samples_out=%s)",
-                        left_context_size,
-                        total_patches,
-                        int(wav.numel()),
-                        trim_samples,
-                        out_len,
-                    )
-                    wav = wav[trim_samples:]
-        return wav
+        return audio.squeeze(1).reshape(-1).detach().cpu().to(torch.float32)
 
 
 def _load_native_voxcpm_model(
@@ -595,6 +575,7 @@ class VoxCPMForConditionalGeneration(nn.Module):
         return temp_prompt_wav, ref_text, temp_prompt_wav
 
     def _latent_ar_hidden_size(self) -> int:
+        """Hidden size placeholder for AR runner bookkeeping (latent stage only)."""
         try:
             return int(getattr(self.vllm_config.model_config.hf_text_config, "hidden_size", 1024))
         except Exception:
@@ -612,7 +593,7 @@ class VoxCPMForConditionalGeneration(nn.Module):
     ) -> torch.Tensor | None:
         """Latent stage under AR scheduler: return degenerate logits so sampler emits a fixed token.
 
-        Real audio-side output is ``multimodal_outputs`` / pooler; this only advances AR bookkeeping.
+        Real outputs are carried via ``multimodal_outputs`` / pooling; logits only advance AR bookkeeping.
         """
         if self.model_stage not in self._LATENT_STAGES:
             return None
@@ -679,8 +660,7 @@ class VoxCPMForConditionalGeneration(nn.Module):
         for info in infos:
             if self.model_stage in self._VAE_STAGES:
                 latent_audio_feat = self._extract_val(info, "latent_audio_feat", None)
-                left_context_size = int(self._extract_val(info, "left_context_size", 0) or 0)
-                audio_tensor = self._pipeline.decode(latent_audio_feat, left_context_size=left_context_size)
+                audio_tensor = self._pipeline.decode(latent_audio_feat)
                 outputs.append(audio_tensor.float().cpu())
                 sample_rates.append(torch.tensor(sample_rate, dtype=torch.int32))
                 continue
