@@ -4,6 +4,7 @@
 INPUT_IMAGE="${INPUT_IMAGE:-../../offline_inference/image_to_video/qwen-bear.png}"
 OUTPUT_PATH="${OUTPUT_PATH:-wan22_i2v_output.mp4}"
 NEGATIVE_PROMPT="${NEGATIVE_PROMPT:-}"
+SAMPLE_SOLVER="${SAMPLE_SOLVER:-}"
 
 if [ ! -f "$INPUT_IMAGE" ]; then
     echo "Input image not found: $INPUT_IMAGE"
@@ -13,6 +14,11 @@ fi
 NEGATIVE_PROMPT_FLAG=""
 if [ -n "$NEGATIVE_PROMPT" ]; then
     NEGATIVE_PROMPT_FLAG="-F negative_prompt=${NEGATIVE_PROMPT}"
+fi
+
+SAMPLE_SOLVER_FLAG=""
+if [ -n "$SAMPLE_SOLVER" ]; then
+    SAMPLE_SOLVER_FLAG="-F sample_solver=${SAMPLE_SOLVER}"
 fi
 
 curl -X POST http://localhost:8099/v1/videos \
@@ -28,6 +34,7 @@ curl -X POST http://localhost:8099/v1/videos \
   -F "guidance_scale_2=1.0" \
   -F "boundary_ratio=0.875" \
   -F "flow_shift=12.0" \
+  $SAMPLE_SOLVER_FLAG \
   -F "seed=42" | jq -r '.data[0].b64_json' | base64 -d > "${OUTPUT_PATH}"
 
 echo "Saved video to ${OUTPUT_PATH}"

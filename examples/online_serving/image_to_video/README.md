@@ -49,6 +49,7 @@ curl -X POST http://localhost:8091/v1/videos \
   -F "guidance_scale_2=1.0" \
   -F "boundary_ratio=0.875" \
   -F "flow_shift=12.0" \
+  -F "sample_solver=euler" \
   -F "seed=42" | jq -r '.data[0].b64_json' | base64 -d > wan22_i2v_output.mp4
 ```
 
@@ -79,5 +80,8 @@ curl -X POST http://localhost:8091/v1/videos \
   -F "guidance_scale_2=1.0" \
   -F "boundary_ratio=0.875" \
   -F "flow_shift=12.0" \
+  -F "sample_solver=euler" \
   -F "seed=42"
 ```
+
+`sample_solver` currently supports `unipc` and `euler`.

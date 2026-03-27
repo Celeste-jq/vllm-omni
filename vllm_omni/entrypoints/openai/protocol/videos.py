@@ -104,6 +104,10 @@ class VideoGenerationRequest(BaseModel):
         default=None,
         description="Scheduler flow_shift for video models (Wan2.2)",
     )
+    sample_solver: str | None = Field(
+        default=None,
+        description="Sampling solver for video models (supported: unipc, euler)",
+    )
     true_cfg_scale: float | None = Field(
         default=None,
         ge=0.0,

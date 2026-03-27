@@ -129,15 +129,18 @@ class OmniOpenAIServingVideo:
         )
         if request.flow_shift is not None:
             gen_params.extra_args["flow_shift"] = request.flow_shift
+        if request.sample_solver is not None:
+            gen_params.extra_args["sample_solver"] = request.sample_solver.lower()
 
         self._apply_lora(request.lora, gen_params)
 
         logger.info(
-            "Video sampling params: steps=%s guidance=%s guidance_2=%s seed=%s",
+            "Video sampling params: steps=%s guidance=%s guidance_2=%s seed=%s sample_solver=%s",
             gen_params.num_inference_steps,
             gen_params.guidance_scale,
             gen_params.guidance_scale_2,
             gen_params.seed,
+            gen_params.extra_args.get("sample_solver"),
         )
 
         result = await self._run_generation(prompt, gen_params, request_id, raw_request)

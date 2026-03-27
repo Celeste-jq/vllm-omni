@@ -251,6 +251,7 @@ def test_sampling_params_pass_through(test_client, mocker: MockerFixture):
             "true_cfg_scale": "4.0",
             "boundary_ratio": "0.7",
             "flow_shift": "0.25",
+            "sample_solver": "euler",
         },
     )
 
@@ -263,6 +264,7 @@ def test_sampling_params_pass_through(test_client, mocker: MockerFixture):
     assert captured.true_cfg_scale == 4.0
     assert captured.boundary_ratio == 0.7
     assert captured.extra_args["flow_shift"] == 0.25
+    assert captured.extra_args["sample_solver"] == "euler"
 
 
 def test_missing_handler_returns_503():
