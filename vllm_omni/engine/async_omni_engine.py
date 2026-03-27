@@ -610,6 +610,7 @@ class AsyncOmniEngine:
         sampling_params_list: Sequence[Any] | None = None,
         final_stage_id: int = 0,
         arrival_time: float | None = None,
+        supported_tasks_override: Sequence[str] | None = None,
     ) -> dict[str, Any]:
         """Build an add_request message after stage-0 preprocessing."""
         effective_sampling_params_list = (
@@ -639,7 +640,7 @@ class AsyncOmniEngine:
                 request_id=request_id,
                 prompt=prompt,
                 params=params,
-                supported_tasks=self.supported_tasks,
+                supported_tasks=tuple(supported_tasks_override or self.supported_tasks),
                 arrival_time=arrival_time,
             )
             # TODO (Peiqi): add this for Qwen3-TTS only. Other models don't have
@@ -911,6 +912,7 @@ class AsyncOmniEngine:
         sampling_params_list: Sequence[Any] | None = None,
         final_stage_id: int = 0,
         arrival_time: float | None = None,
+        supported_tasks_override: Sequence[str] | None = None,
     ) -> None:
         """Process stage-0 input locally, then send to the Orchestrator.
 
@@ -925,6 +927,7 @@ class AsyncOmniEngine:
             sampling_params_list=sampling_params_list,
             final_stage_id=final_stage_id,
             arrival_time=arrival_time,
+            supported_tasks_override=supported_tasks_override,
         )
         if self.request_queue is None:
             raise RuntimeError("request_queue is not initialized")
@@ -946,6 +949,7 @@ class AsyncOmniEngine:
         sampling_params_list: Sequence[Any] | None = None,
         final_stage_id: int = 0,
         arrival_time: float | None = None,
+        supported_tasks_override: Sequence[str] | None = None,
     ) -> None:
         """Async add_request API."""
         self.add_request(
@@ -954,6 +958,7 @@ class AsyncOmniEngine:
             sampling_params_list=sampling_params_list,
             final_stage_id=final_stage_id,
             arrival_time=arrival_time,
+            supported_tasks_override=supported_tasks_override,
         )
 
     def try_get_output(self, timeout: float = 0.001) -> dict[str, Any] | None:

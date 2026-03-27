@@ -124,6 +124,9 @@ class OmniRequestState(RequestState):
                         elif k == "sr":
                             # Sample rate is a constant scalar, keep last value.
                             self.mm_accumulated[k] = v[-1]
+                        elif k == "voxcpm_streaming_continue":
+                            # Per-step 0-d flags; concatenation is meaningless.
+                            self.mm_accumulated[k] = v[-1]
                         else:
                             self.mm_accumulated[k] = torch.cat(v, dim=0)
                     except Exception:

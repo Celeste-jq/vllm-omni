@@ -130,6 +130,7 @@ class Omni(OmniBase):
                     prompt=prompt,
                     sampling_params_list=sampling_params_list,
                     final_stage_id=final_stage_id,
+                    supported_tasks_override=("generate",),
                 )
                 submit_ts = time.time()
                 req_state.metrics.stage_first_ts[0] = submit_ts

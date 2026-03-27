@@ -309,6 +309,10 @@ class NPUGenerationModelRunner(OmniNPUModelRunner):
 
         if self.execute_model_state is None:
             # Nothing to do (PP non-final rank case), output isn't used.
+            # With async scheduling + PP, receive sampled token ids from the
+            # last PP rank so subsequent input preparation has consistent state.
+            if self.use_async_scheduling and get_pp_group().world_size > 1:
+                self._pp_receive_prev_sampled_token_ids_to_input_batch()
             if not kv_connector_output:
                 return None  # noqa
             # In case of PP with kv transfer, we need to pass through the
@@ -366,7 +370,11 @@ class NPUGenerationModelRunner(OmniNPUModelRunner):
                                 f"Multimodal output list for key '{key}' has length {len(out)} "
                                 f"but expected {num_reqs} (one entry per request)."
                             )
-                        mm_payload[key] = out[i].detach().to("cpu").contiguous()
+                        elem = out[i]
+                        if isinstance(elem, torch.Tensor):
+                            mm_payload[key] = elem.detach().to("cpu").contiguous()
+                        else:
+                            mm_payload[key] = elem
                     elif isinstance(out, torch.Tensor):
                         mm_payload[key] = out.detach().to("cpu").contiguous()
                     else:

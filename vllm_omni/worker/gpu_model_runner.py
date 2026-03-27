@@ -965,11 +965,15 @@ class OmniGPUModelRunner(GPUModelRunner):
             info = self.model_intermediate_buffer.get(req_id, {})
             if info:
                 info["generated_len"] = generated_len
+                if self.model.__class__.__name__ == "VoxCPMForConditionalGeneration":
+                    info["omni_req_id"] = req_id
                 per_req_runtime_info.append(info)
                 if "thinker_reply_part_per_request" in info:
                     q = info["thinker_reply_part_per_request"]
                     if hasattr(q, "shape"):
                         logger.debug(f"[OMNI] req={req_id} has thinker_reply_part_per_request queue shape: {q.shape}")
+            elif self.model.__class__.__name__ == "VoxCPMForConditionalGeneration":
+                per_req_runtime_info.append({"generated_len": generated_len, "omni_req_id": req_id})
             else:
                 per_req_runtime_info.append({})
         return per_req_runtime_info
@@ -1298,16 +1302,15 @@ class OmniGPUModelRunner(GPUModelRunner):
             None, self.vllm_config, cudagraph_runtime_mode=_cudagraph_mode, batch_descriptor=batch_desc
         ):
             req_embeds, code_predictor_codes = self.talker_mtp(req_input_ids, req_embeds, last_talker_hidden, text_step)
-        # code_predictor_codes stays on GPU here; _update_intermediate_buffer
-        # keeps it device-resident when the key is in gpu_resident_buffer_keys.
-        # D2H is deferred to sample_tokens where hidden_states.to("cpu") already
-        # syncs the stream, avoiding a per-step cudaStreamSynchronize.
+        # Keep update payload CPU-resident for downstream consumers that
+        # read additional_information outside the current CUDA stream.
+        code_predictor_codes_cpu = code_predictor_codes.detach().to("cpu").contiguous()
         out_key = getattr(self.model, "talker_mtp_output_key", "code_predictor_codes")
         for idx, req_id in enumerate(decode_req_ids):
             req_index = self.input_batch.req_ids.index(req_id)
             start_offset = int(self.query_start_loc.cpu[req_index])
             inputs_embeds[start_offset : start_offset + 1] = req_embeds[idx : idx + 1]
-            update_dict = {out_key: code_predictor_codes[idx : idx + 1]}
+            update_dict = {out_key: code_predictor_codes_cpu[idx : idx + 1]}
             self._merge_additional_information_update(req_id, update_dict)
 
     def _model_forward(
