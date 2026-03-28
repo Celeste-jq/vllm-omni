@@ -10,9 +10,12 @@ import torch
 from vllm_omni.model_executor.models.voxcpm.voxcpm import (
     _DirectVoxCPMAudioVAE,
     _DirectVoxCPMLatentGenerator,
+    _VoxCPMLatentStreamState,
     _build_prompt_cache_with_audio_load_fallback,
+    _init_voxcpm_latent_stream_state,
     _normalize_dtype_name,
     _prepare_runtime_model_dir,
+    _step_voxcpm_latent_stream_state,
     VoxCPMForConditionalGeneration,
 )
 from vllm_omni.model_executor.stage_input_processors.voxcpm import latent2vae
@@ -157,6 +160,191 @@ def test_build_prompt_cache_falls_back_to_soundfile(monkeypatch: pytest.MonkeyPa
         "shape": (1, 3),
         "sample_rate": 16000,
     }
+
+
+def test_init_voxcpm_latent_stream_state_preserves_max_inf():
+    class _FakeKVCache:
+        def __init__(self):
+            self._step = 0
+
+        def fill_caches(self, *_args, **_kwargs):
+            return None
+
+        def step(self):
+            cur = self._step
+            self._step += 1
+            return cur
+
+    class _FakeLM:
+        def __init__(self):
+            self.kv_cache = _FakeKVCache()
+
+        def embed_tokens(self, tokens):
+            b, t = tokens.shape
+            return torch.ones((b, t, 4), dtype=torch.float32)
+
+        def __call__(self, *, inputs_embeds, is_causal=True):
+            del is_causal
+            return inputs_embeds + 1.0, object()
+
+        def forward_step(self, hidden, positions):
+            del positions
+            return hidden + 2.0
+
+    class _FakeFeatEncoder:
+        def __call__(self, feat):
+            return feat.mean(dim=2)
+
+    class _FakeProj:
+        def __call__(self, x):
+            return x
+
+    class _FakeTTSModel:
+        patch_size = 2
+        device = torch.device("cpu")
+
+        def __init__(self):
+            self.audio_vae = SimpleNamespace(latent_dim=4)
+            self.base_lm = _FakeLM()
+            self.residual_lm = _FakeLM()
+            self.feat_encoder = _FakeFeatEncoder()
+            self.enc_to_lm_proj = _FakeProj()
+            self.fsq_layer = _FakeProj()
+            self.lm_to_dit_proj = _FakeProj()
+            self.res_to_dit_proj = _FakeProj()
+            self.config = SimpleNamespace(
+                dtype="bfloat16",
+                lm_config=SimpleNamespace(scale_emb=1.0, use_mup=False),
+            )
+            self.audio_start_token = 3
+
+        def text_tokenizer(self, text):
+            return [1] * len(text.split())
+
+    state = _init_voxcpm_latent_stream_state(
+        _FakeTTSModel(),
+        target_text="a b c d",
+        prompt_cache=None,
+        min_len=2,
+        max_len=100,
+        inference_timesteps=10,
+        cfg_value=2.0,
+        retry_badcase_ratio_threshold=6.0,
+    )
+
+    assert isinstance(state, _VoxCPMLatentStreamState)
+    assert state.max_len == 34
+
+
+def test_step_voxcpm_latent_stream_state_advances_one_native_step():
+    class _FakeKVCache:
+        def __init__(self):
+            self._step = 0
+
+        def fill_caches(self, *_args, **_kwargs):
+            return None
+
+        def step(self):
+            cur = self._step
+            self._step += 1
+            return cur
+
+    class _FakeLM:
+        def __init__(self):
+            self.kv_cache = _FakeKVCache()
+            self.forward_step_calls = 0
+
+        def embed_tokens(self, tokens):
+            b, t = tokens.shape
+            return torch.ones((b, t, 4), dtype=torch.float32)
+
+        def __call__(self, *, inputs_embeds, is_causal=True):
+            del is_causal
+            return inputs_embeds + 1.0, object()
+
+        def forward_step(self, hidden, positions):
+            del positions
+            self.forward_step_calls += 1
+            return hidden + 2.0
+
+    class _FakeFeatEncoder:
+        def __call__(self, feat):
+            return feat.mean(dim=2)
+
+    class _FakeProj:
+        def __call__(self, x):
+            return x
+
+    class _FakeStopHead:
+        def __init__(self):
+            self.calls = 0
+
+        def __call__(self, hidden):
+            del hidden
+            self.calls += 1
+            if self.calls == 1:
+                return torch.tensor([[1.0, 0.0]], dtype=torch.float32)
+            return torch.tensor([[0.0, 1.0]], dtype=torch.float32)
+
+    class _FakeFeatDecoder:
+        def __init__(self):
+            self.calls = 0
+
+        def __call__(self, *, mu, patch_size, cond, n_timesteps, cfg_value):
+            del mu, cond, n_timesteps, cfg_value
+            self.calls += 1
+            value = float(self.calls)
+            return torch.full((1, 4, patch_size), value, dtype=torch.float32)
+
+    class _FakeTTSModel:
+        patch_size = 2
+        device = torch.device("cpu")
+
+        def __init__(self):
+            self.audio_vae = SimpleNamespace(latent_dim=4)
+            self.base_lm = _FakeLM()
+            self.residual_lm = _FakeLM()
+            self.feat_encoder = _FakeFeatEncoder()
+            self.enc_to_lm_proj = _FakeProj()
+            self.fsq_layer = _FakeProj()
+            self.lm_to_dit_proj = _FakeProj()
+            self.res_to_dit_proj = _FakeProj()
+            self.stop_proj = _FakeProj()
+            self.stop_actn = _FakeProj()
+            self.stop_head = _FakeStopHead()
+            self.feat_decoder = _FakeFeatDecoder()
+            self.config = SimpleNamespace(
+                dtype="bfloat16",
+                lm_config=SimpleNamespace(scale_emb=1.0, use_mup=False),
+            )
+            self.audio_start_token = 3
+
+        def text_tokenizer(self, text):
+            return [1] * len(text.split())
+
+    tts = _FakeTTSModel()
+    state = _init_voxcpm_latent_stream_state(
+        tts,
+        target_text="hello world",
+        prompt_cache=None,
+        min_len=0,
+        max_len=8,
+        inference_timesteps=10,
+        cfg_value=2.0,
+        retry_badcase_ratio_threshold=6.0,
+    )
+
+    patch_1, has_more_1 = _step_voxcpm_latent_stream_state(tts, state)
+    patch_2, has_more_2 = _step_voxcpm_latent_stream_state(tts, state)
+
+    assert tuple(patch_1.shape) == (1, 2, 4)
+    assert tuple(patch_2.shape) == (1, 2, 4)
+    assert has_more_1 is True
+    assert has_more_2 is False
+    assert state.done is True
+    assert state.step_idx == 2
+    assert tts.base_lm.forward_step_calls == 1
+    assert tts.residual_lm.forward_step_calls == 1
 
 
 def test_audio_vae_prepare_latents_for_decode():
