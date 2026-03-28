@@ -527,6 +527,31 @@ class TestTTSMethods:
         assert server._is_tts is True
         assert server._tts_stage is mock_stage
 
+    def test_is_tts_detection_with_voxcpm_stage(self, mocker: MockerFixture):
+        """VoxCPM split-stage pipeline should also be detected as TTS."""
+        mock_engine_client = mocker.MagicMock()
+        mock_engine_client.errored = False
+        mock_engine_client.tts_max_instructions_length = None
+
+        mock_stage = mocker.MagicMock()
+        mock_stage.engine_args.model_stage = "latent_generator"
+        mock_stage.engine_args.model_arch = "VoxCPMForConditionalGeneration"
+        mock_stage.tts_args = {}
+        mock_engine_client.stage_configs = [mock_stage]
+
+        mock_models = mocker.MagicMock()
+        mock_models.is_base_model.return_value = True
+
+        server = OmniOpenAIServingSpeech(
+            engine_client=mock_engine_client,
+            models=mock_models,
+            request_logger=mocker.MagicMock(),
+        )
+
+        assert server._is_tts is True
+        assert server._is_voxcpm is True
+        assert server._tts_stage is mock_stage
+
     def test_estimate_prompt_len_fallback(self, speech_server):
         """Test prompt length estimation falls back to 2048 when model is unavailable."""
         tts_params = {"text": ["Hello"], "task_type": ["CustomVoice"]}
@@ -609,6 +634,65 @@ class TestTTSMethods:
         assert params["speaker"] == ["Ryan"]
         assert params["language"] == ["English"]
         assert params["task_type"] == ["CustomVoice"]
+
+    def test_validate_voxcpm_request(self, speech_server):
+        """Test VoxCPM-specific request validation."""
+        assert speech_server._validate_voxcpm_request(OpenAICreateSpeechRequest(input="Hello")) is None
+
+        req = OpenAICreateSpeechRequest(input="Hello", ref_audio="data:audio/wav;base64,abc")
+        assert "both 'ref_audio' and 'ref_text'" in speech_server._validate_voxcpm_request(req)
+
+        req = OpenAICreateSpeechRequest(input="Hello", voice="Vivian")
+        assert "does not support named 'voice'" in speech_server._validate_voxcpm_request(req)
+
+        req = OpenAICreateSpeechRequest(input="Hello", task_type="Base")
+        error = speech_server._validate_voxcpm_request(req)
+        assert error is not None
+        assert "does not support the following Speech API parameters" in error
+        assert "task_type" in error
+
+    def test_build_voxcpm_params(self, speech_server):
+        req = OpenAICreateSpeechRequest(input="Hello", ref_text="Reference", max_new_tokens=321)
+        params = speech_server._build_voxcpm_params(req)
+
+        assert params == {
+            "text": ["Hello"],
+            "ref_text": ["Reference"],
+            "max_new_tokens": [321],
+        }
+
+    @pytest.mark.asyncio
+    async def test_prepare_speech_generation_for_voxcpm(self, speech_server, mocker: MockerFixture):
+        speech_server._is_tts = True
+        speech_server._is_voxcpm = True
+        speech_server._is_fish_speech = False
+        speech_server.engine_client.default_sampling_params_list = [{"stage": 0}]
+
+        sentinel_generator = object()
+        speech_server.engine_client.generate = mocker.MagicMock(return_value=sentinel_generator)
+        speech_server._resolve_ref_audio = AsyncMock(return_value=([0.1, 0.2], 24000))
+
+        req = OpenAICreateSpeechRequest(
+            input="Hello VoxCPM",
+            ref_audio="data:audio/wav;base64,abc",
+            ref_text="Reference transcript",
+            max_new_tokens=128,
+        )
+
+        request_id, generator, tts_params = await speech_server._prepare_speech_generation(req)
+
+        assert request_id.startswith("speech-")
+        assert generator is sentinel_generator
+        assert tts_params == {
+            "text": ["Hello VoxCPM"],
+            "ref_text": ["Reference transcript"],
+            "ref_audio": [[[0.1, 0.2], 24000]],
+            "max_new_tokens": [128],
+        }
+        speech_server.engine_client.generate.assert_called_once()
+        prompt = speech_server.engine_client.generate.call_args.kwargs["prompt"]
+        assert prompt["prompt_token_ids"] == [1]
+        assert prompt["additional_information"] == tts_params
 
     def test_load_supported_speakers(self, mocker: MockerFixture):
         """Test _load_supported_speakers."""
