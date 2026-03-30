@@ -1,18 +1,22 @@
 #!/usr/bin/env python3
 """
-Assemble a Wan2.2-I2V-A14B-Diffusers-style model directory using
-LightX2V-converted high/low-noise transformer weights.
+Assemble a Wan2.2-I2V-A14B-Diffusers-style model directory using a Diffusers
+skeleton and optional replacement transformer checkpoints.
 
-This tool does NOT run LightX2V converter.py. It assumes you already have:
-- high-noise converted weight (for transformer/)
-- low-noise converted weight (for transformer_2/)
+This tool does NOT run any external conversion step. You can use it in two
+ways:
+- keep the original weights from the Diffusers skeleton
+- replace transformer/transformer_2 with converted checkpoints such as
+  LightX2V outputs
+- use legacy LightX2V arg names (--high-noise-weight/--low-noise-weight),
+  which are accepted as aliases
 
 Typical use:
-  python tools/wan22/assemble_lightx2v_wan22_i2v_diffusers.py \
+  python tools/wan22/assemble_wan22_i2v_diffusers.py \
     --diffusers-skeleton /path/to/Wan2.2-I2V-A14B-Diffusers \
-    --high-noise-weight /path/to/high_noise_out/diffusion_pytorch_model.safetensors \
-    --low-noise-weight /path/to/low_noise_out/diffusion_pytorch_model.safetensors \
-    --output-dir /path/to/Wan2.2-I2V-A14B-LightX2V-Diffusers
+    --transformer-weight /path/to/high_noise_out/diffusion_pytorch_model.safetensors \
+    --transformer-2-weight /path/to/low_noise_out/diffusion_pytorch_model.safetensors \
+    --output-dir /path/to/Wan2.2-I2V-A14B-Custom-Diffusers
 """
 
 from __future__ import annotations
@@ -130,7 +134,6 @@ def _canonical_weight_name(weight_file: Path) -> str:
         return "diffusion_pytorch_model.bin"
     if suffix == ".pt":
         return "diffusion_pytorch_model.pt"
-    # keep original if suffix is unusual
     return weight_file.name
 
 
@@ -197,8 +200,8 @@ def _materialize_weight(weight: WeightSpec, dst_dir: Path, role: str) -> tuple[P
 def _assemble(
     skeleton: Path,
     output_dir: Path,
-    high_weight: WeightSpec,
-    low_weight: WeightSpec,
+    transformer_weight: WeightSpec,
+    transformer_2_weight: WeightSpec,
     asset_mode: str,
 ) -> tuple[tuple[Path, ...], tuple[Path, ...]]:
     shutil.copy2(skeleton / "model_index.json", output_dir / "model_index.json")
@@ -219,13 +222,21 @@ def _assemble(
     shutil.copy2(skeleton / "transformer" / "config.json", output_dir / "transformer" / "config.json")
     shutil.copy2(skeleton / "transformer_2" / "config.json", output_dir / "transformer_2" / "config.json")
 
-    high_copied = _materialize_weight(high_weight, output_dir / "transformer", role="high-noise")
-    low_copied = _materialize_weight(low_weight, output_dir / "transformer_2", role="low-noise")
+    transformer_copied = _materialize_weight(transformer_weight, output_dir / "transformer", role="transformer")
+    transformer_2_copied = _materialize_weight(
+        transformer_2_weight,
+        output_dir / "transformer_2",
+        role="transformer_2",
+    )
 
-    return high_copied, low_copied
+    return transformer_copied, transformer_2_copied
 
 
-def _validate_output(output_dir: Path, high_copied: tuple[Path, ...], low_copied: tuple[Path, ...]) -> None:
+def _validate_output(
+    output_dir: Path,
+    transformer_copied: tuple[Path, ...],
+    transformer_2_copied: tuple[Path, ...],
+) -> None:
     if not (output_dir / "model_index.json").is_file():
         raise AssembleError("Output validation failed: model_index.json missing")
 
@@ -235,8 +246,8 @@ def _validate_output(output_dir: Path, high_copied: tuple[Path, ...], low_copied
         output_dir / "vae",
         output_dir / "transformer" / "config.json",
         output_dir / "transformer_2" / "config.json",
-        *high_copied,
-        *low_copied,
+        *transformer_copied,
+        *transformer_2_copied,
     )
     missing = [str(p) for p in required_paths if not p.exists()]
     if missing:
@@ -245,37 +256,50 @@ def _validate_output(output_dir: Path, high_copied: tuple[Path, ...], low_copied
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Assemble a Wan2.2-I2V-A14B-Diffusers directory with LightX2V-converted weights."
+        description=(
+            "Assemble a Wan2.2-I2V-A14B-Diffusers directory while optionally "
+            "replacing transformer and transformer_2 weights."
+        )
     )
     parser.add_argument(
         "--diffusers-skeleton",
         type=Path,
         required=True,
-        help="Path to Wan-AI/Wan2.2-I2V-A14B-Diffusers local directory.",
+        help="Path to a local Wan-AI/Wan2.2-I2V-A14B-Diffusers directory.",
+    )
+    parser.add_argument(
+        "--transformer-weight",
+        type=Path,
+        help=(
+            "Optional checkpoint file, or directory containing either a single-file "
+            "weight or sharded index+shards for transformer/. If omitted, keep the "
+            "skeleton's original transformer weights."
+        ),
+    )
+    parser.add_argument(
+        "--transformer-2-weight",
+        type=Path,
+        help=(
+            "Optional checkpoint file, or directory containing either a single-file "
+            "weight or sharded index+shards for transformer_2/. If omitted, keep the "
+            "skeleton's original transformer_2 weights."
+        ),
     )
     parser.add_argument(
         "--high-noise-weight",
         type=Path,
-        required=True,
-        help=(
-            "High-noise checkpoint file, or a directory containing either "
-            "a single-file weight or sharded index+shards (for transformer)."
-        ),
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--low-noise-weight",
         type=Path,
-        required=True,
-        help=(
-            "Low-noise checkpoint file, or a directory containing either "
-            "a single-file weight or sharded index+shards (for transformer_2)."
-        ),
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--output-dir",
         type=Path,
         required=True,
-        help="Output directory for assembled model.",
+        help="Output directory for the assembled model.",
     )
     parser.add_argument(
         "--asset-mode",
@@ -299,23 +323,46 @@ def main() -> int:
 
     skeleton = args.diffusers_skeleton.resolve()
     output_dir = args.output_dir.resolve()
-    high_input = args.high_noise_weight.resolve()
-    low_input = args.low_noise_weight.resolve()
+
+    if args.transformer_weight is not None and args.high_noise_weight is not None:
+        print(
+            "[ERROR] --transformer-weight and --high-noise-weight are aliases; please provide only one.",
+            file=sys.stderr,
+        )
+        return 2
+    if args.transformer_2_weight is not None and args.low_noise_weight is not None:
+        print(
+            "[ERROR] --transformer-2-weight and --low-noise-weight are aliases; please provide only one.",
+            file=sys.stderr,
+        )
+        return 2
+
+    transformer_weight_arg = args.transformer_weight if args.transformer_weight is not None else args.high_noise_weight
+    transformer_2_weight_arg = (
+        args.transformer_2_weight if args.transformer_2_weight is not None else args.low_noise_weight
+    )
+
+    transformer_input = (
+        transformer_weight_arg.resolve() if transformer_weight_arg is not None else skeleton / "transformer"
+    )
+    transformer_2_input = (
+        transformer_2_weight_arg.resolve() if transformer_2_weight_arg is not None else skeleton / "transformer_2"
+    )
 
     try:
         _validate_skeleton(skeleton)
-        high_weight = _resolve_weight_spec(high_input, role="high-noise")
-        low_weight = _resolve_weight_spec(low_input, role="low-noise")
+        transformer_weight = _resolve_weight_spec(transformer_input, role="transformer")
+        transformer_2_weight = _resolve_weight_spec(transformer_2_input, role="transformer_2")
 
         _ensure_clean_output(output_dir, overwrite=args.overwrite)
-        high_copied, low_copied = _assemble(
+        transformer_copied, transformer_2_copied = _assemble(
             skeleton=skeleton,
             output_dir=output_dir,
-            high_weight=high_weight,
-            low_weight=low_weight,
+            transformer_weight=transformer_weight,
+            transformer_2_weight=transformer_2_weight,
             asset_mode=args.asset_mode,
         )
-        _validate_output(output_dir, high_copied, low_copied)
+        _validate_output(output_dir, transformer_copied, transformer_2_copied)
     except AssembleError as exc:
         print(f"[ERROR] {exc}", file=sys.stderr)
         return 2
@@ -323,13 +370,12 @@ def main() -> int:
     def _weight_summary(copied: tuple[Path, ...]) -> str:
         if len(copied) == 1:
             return copied[0].name
-        # copied[0] is index file, the rest are shards
         return f"{copied[0].name} + {len(copied) - 1} shard files"
 
     print("[OK] Assembled Wan2.2 I2V Diffusers directory:")
     print(f"  output_dir: {output_dir}")
-    print(f"  transformer weight: {_weight_summary(high_copied)}")
-    print(f"  transformer_2 weight: {_weight_summary(low_copied)}")
+    print(f"  transformer weight: {_weight_summary(transformer_copied)}")
+    print(f"  transformer_2 weight: {_weight_summary(transformer_2_copied)}")
     print("\nUse it with vLLM-Omni, for example:")
     print(f"  vllm serve {output_dir} --omni --port 8091")
     return 0

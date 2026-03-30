@@ -75,22 +75,24 @@ Key arguments:
 
 > ℹ️ If you encounter OOM errors, try using `--vae-use-slicing` and `--vae-use-tiling` to reduce memory usage.
 
-## Wan2.2 I2V + LightX2V (Offline Conversion)
+## Wan2.2 I2V Offline Assembly
 
-If you want to run Wan2.2 I2V through a LightX2V-converted Diffusers directory in vLLM-Omni,
-use the offline conversion route below.
+If you want to run a locally assembled Wan2.2 I2V Diffusers directory in
+vLLM-Omni, you can either keep the original Diffusers weights or replace
+`transformer/` and `transformer_2/` with converted checkpoints such as
+LightX2V outputs.
 
 ### Required assets
 
 - Base model: `Wan-AI/Wan2.2-I2V-A14B`
 - Diffusers skeleton: `Wan-AI/Wan2.2-I2V-A14B-Diffusers`
-- LoRA weights: `lightx2v/Wan2.2-Distill-Loras`
-- LightX2V converter: `tools/convert/converter.py`
+- Optional external converter from the LightX2V project (not shipped in this repository)
+- Optional LoRA weights: `lightx2v/Wan2.2-Distill-Loras`
 
-### Step 1: Convert high/low noise DiT weights
+### Step 1: Optional - convert high/low-noise DiT weights with LightX2V
 
 ```bash
-python converter.py \
+python /path/to/lightx2v/tools/convert/converter.py \
   --source /path/to/Wan2.2-I2V-A14B/high_noise_model \
   --output /tmp/wan22_lightx2v/high_noise_out \
   --output_ext .safetensors \
@@ -101,7 +103,7 @@ python converter.py \
   --lora_key_convert auto \
   --single_file
 
-python converter.py \
+python /path/to/lightx2v/tools/convert/converter.py \
   --source /path/to/Wan2.2-I2V-A14B/low_noise_model \
   --output /tmp/wan22_lightx2v/low_noise_out \
   --output_ext .safetensors \
@@ -113,23 +115,30 @@ python converter.py \
   --single_file
 ```
 
+If you are not using LightX2V, skip this step and either keep the original
+Diffusers weights from the skeleton or point Step 2 at any other converted
+`transformer/` and `transformer_2/` checkpoints.
+
 ### Step 2: Assemble a final Diffusers-style directory
 
 ```bash
-python tools/wan22/assemble_lightx2v_wan22_i2v_diffusers.py \
+python tools/wan22/assemble_wan22_i2v_diffusers.py \
   --diffusers-skeleton /path/to/Wan2.2-I2V-A14B-Diffusers \
-  --high-noise-weight /tmp/wan22_lightx2v/high_noise_out \
-  --low-noise-weight /tmp/wan22_lightx2v/low_noise_out \
-  --output-dir /path/to/Wan2.2-I2V-A14B-LightX2V-Diffusers \
+  --transformer-weight /tmp/wan22_lightx2v/high_noise_out \
+  --transformer-2-weight /tmp/wan22_lightx2v/low_noise_out \
+  --output-dir /path/to/Wan2.2-I2V-A14B-Custom-Diffusers \
   --asset-mode symlink \
   --overwrite
 ```
+
+`--transformer-weight` and `--transformer-2-weight` are optional. If you omit
+them, the tool keeps the original weights from the Diffusers skeleton.
 
 ### Step 3: Run offline inference
 
 ```bash
 python image_to_video.py \
-  --model /path/to/Wan2.2-I2V-A14B-LightX2V-Diffusers \
+  --model /path/to/Wan2.2-I2V-A14B-Custom-Diffusers \
   --image /path/to/input.jpg \
   --prompt "A cat playing with yarn" \
   --num-frames 81 \
@@ -146,6 +155,6 @@ python image_to_video.py \
 
 Notes:
 
-- This route avoids runtime LoRA loading changes in vLLM-Omni.
-- Output quality/speed depends on chosen LightX2V LoRA and sampling params.
+- This route avoids runtime LoRA loading changes in vLLM-Omni when you choose to bake converted weights into a local Diffusers directory.
+- Output quality and speed depend on the replacement checkpoints and sampling params you choose.
 - For native diffusion LoRA behavior in vLLM-Omni, see `docs/user_guide/diffusion/lora.md`.
