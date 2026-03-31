@@ -365,6 +365,26 @@ def test_audio_vae_prepare_latents_for_decode():
     assert tuple(prepared.shape) == (1, 4, 6)
 
 
+def test_audio_vae_warmup_runs_one_dummy_decode():
+    class _FakeAudioVAE(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.sample_rate = 24000
+            self.latent_dim = 4
+            self.param = torch.nn.Parameter(torch.zeros(1))
+            self.decode_calls = 0
+
+        def decode(self, z):
+            self.decode_calls += 1
+            return z.sum(dim=1, keepdim=True)
+
+    decoder = _DirectVoxCPMAudioVAE(_FakeAudioVAE())
+
+    decoder.warmup()
+
+    assert decoder.audio_vae.decode_calls == 1
+
+
 def test_latent2vae_wraps_stage_outputs():
     latent = torch.ones((3, 2, 4), dtype=torch.float32)
     stage_output = SimpleNamespace(

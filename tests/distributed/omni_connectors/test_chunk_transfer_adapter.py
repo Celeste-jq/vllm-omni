@@ -182,6 +182,18 @@ def test_postprocess_scheduler_output(build_adapter):
     assert adapter.requests_with_ready_chunks == {"leftover"}
 
 
+def test_after_latent_chunk_consumed_clears_last_payload(build_adapter):
+    adapter, _ = build_adapter(stage_id=1, model_mode="generation")
+    request = _req("req-1", RequestStatus.RUNNING, external_req_id="external-1")
+    request.additional_information = {"latent_audio_feat": torch.ones((1, 2, 4), dtype=torch.float32)}
+    adapter._latent_chunk_inbox["external-1"].append({"_latent_chunk_count": 1})
+
+    adapter.after_latent_chunk_consumed(request)
+
+    assert request.additional_information is None
+    assert adapter._latent_chunk_inbox["external-1"] == deque()
+
+
 # ---------------------------------------------------------------
 # Cleanup tests
 # ---------------------------------------------------------------

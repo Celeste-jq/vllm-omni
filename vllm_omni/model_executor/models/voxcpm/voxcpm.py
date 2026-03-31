@@ -538,6 +538,16 @@ class _DirectVoxCPMAudioVAE:
         audio = self.audio_vae.decode(latents.to(device=device, dtype=torch.float32))
         return audio.squeeze(1).reshape(-1).detach().cpu().to(torch.float32)
 
+    @torch.no_grad()
+    def warmup(self) -> None:
+        """Run one tiny decode up front so the first real chunk is not cold."""
+        try:
+            dummy_latents = torch.zeros((1, 1, self.latent_dim), dtype=torch.float32)
+            _ = self.decode(dummy_latents)
+            logger.info("Warmed up VoxCPM audio VAE decoder")
+        except Exception:
+            logger.warning("Failed to warm up VoxCPM audio VAE decoder", exc_info=True)
+
 
 def _load_native_voxcpm_model(
     model_path: str,
@@ -592,7 +602,9 @@ def _load_native_voxcpm_audio_vae(
     audio_vae = audio_vae.to(device=device, dtype=torch.float32).eval()
     if device.type == "npu" and hasattr(torch, "npu"):
         torch.npu.set_device(device)
-    return _DirectVoxCPMAudioVAE(audio_vae)
+    runtime_vae = _DirectVoxCPMAudioVAE(audio_vae)
+    runtime_vae.warmup()
+    return runtime_vae
 
 
 class VoxCPMForConditionalGeneration(nn.Module):

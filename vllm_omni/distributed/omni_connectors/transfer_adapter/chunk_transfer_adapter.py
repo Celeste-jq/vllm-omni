@@ -154,6 +154,10 @@ class OmniChunkTransferAdapter(OmniTransferAdapterBase):
         if q:
             request.additional_information = dict(q[0])
             self.requests_with_ready_chunks.add(request.request_id)
+        else:
+            # Clear the last delivered chunk so the terminal "finished" scheduler
+            # tick does not decode the same latent payload twice.
+            request.additional_information = None
 
     def _poll_single_request(self, request: Request):
         stage_id = self.connector.stage_id
