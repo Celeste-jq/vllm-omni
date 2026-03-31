@@ -5,6 +5,7 @@ tasks, then runs Omni generation and saves output wav files.
 """
 
 import asyncio
+import copy
 import logging
 import os
 import time
@@ -27,6 +28,10 @@ class QueryResult(NamedTuple):
 
     inputs: dict
     model_name: str
+
+
+def _resolve_model_name(default_model_name: str, override_model_name: str | None = None) -> str:
+    return override_model_name or default_model_name
 
 
 def _estimate_prompt_len(
@@ -119,7 +124,7 @@ def _estimate_prompt_len(
         return 2048
 
 
-def get_custom_voice_query(use_batch_sample: bool = False) -> QueryResult:
+def get_custom_voice_query(use_batch_sample: bool = False, model_name: str | None = None) -> QueryResult:
     """Build CustomVoice sample inputs.
 
     Args:
@@ -129,7 +134,7 @@ def get_custom_voice_query(use_batch_sample: bool = False) -> QueryResult:
         QueryResult with Omni inputs and the CustomVoice model path.
     """
     task_type = "CustomVoice"
-    model_name = "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"
+    model_name = _resolve_model_name("Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice", model_name)
     if use_batch_sample:
         texts = [
             "其实我真的有发现，我是一个特别善于观察别人情绪的人。",
@@ -180,7 +185,7 @@ def get_custom_voice_query(use_batch_sample: bool = False) -> QueryResult:
     )
 
 
-def get_voice_design_query(use_batch_sample: bool = False) -> QueryResult:
+def get_voice_design_query(use_batch_sample: bool = False, model_name: str | None = None) -> QueryResult:
     """Build VoiceDesign sample inputs.
 
     Args:
@@ -190,7 +195,7 @@ def get_voice_design_query(use_batch_sample: bool = False) -> QueryResult:
         QueryResult with Omni inputs and the VoiceDesign model path.
     """
     task_type = "VoiceDesign"
-    model_name = "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign"
+    model_name = _resolve_model_name("Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign", model_name)
     if use_batch_sample:
         texts = [
             "哥哥，你回来啦，人家等了你好久好久了，要抱抱！",
@@ -239,7 +244,11 @@ def get_voice_design_query(use_batch_sample: bool = False) -> QueryResult:
     )
 
 
-def get_base_query(use_batch_sample: bool = False, mode_tag: str = "icl") -> QueryResult:
+def get_base_query(
+    use_batch_sample: bool = False,
+    mode_tag: str = "icl",
+    model_name: str | None = None,
+) -> QueryResult:
     """Build Base (voice clone) sample inputs.
 
     Args:
@@ -250,7 +259,7 @@ def get_base_query(use_batch_sample: bool = False, mode_tag: str = "icl") -> Que
         QueryResult with Omni inputs and the Base model path.
     """
     task_type = "Base"
-    model_name = "Qwen/Qwen3-TTS-12Hz-1.7B-Base"
+    model_name = _resolve_model_name("Qwen/Qwen3-TTS-12Hz-1.7B-Base", model_name)
     ref_audio_path_1 = "https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen3-TTS-Repo/clone_2.wav"
     ref_audio_single = ref_audio_path_1
     ref_text_single = (
@@ -320,9 +329,13 @@ def _build_inputs(args) -> tuple[str, list]:
 
     query_func = query_map[args.query_type]
     if args.query_type in {"CustomVoice", "VoiceDesign"}:
-        query_result = query_func(use_batch_sample=args.use_batch_sample)
+        query_result = query_func(use_batch_sample=args.use_batch_sample, model_name=args.model)
     elif args.query_type == "Base":
-        query_result = query_func(use_batch_sample=args.use_batch_sample, mode_tag=args.mode_tag)
+        query_result = query_func(
+            use_batch_sample=args.use_batch_sample,
+            mode_tag=args.mode_tag,
+            model_name=args.model,
+        )
     else:
         query_result = query_func()
 
@@ -333,6 +346,8 @@ def _build_inputs(args) -> tuple[str, list]:
             lines = [line.strip() for line in f if line.strip()]
         if not lines:
             raise ValueError(f"No valid prompts found in {args.txt_prompts}")
+        if args.num_prompts > 0:
+            lines = lines[: args.num_prompts]
         template = query_result.inputs if not isinstance(query_result.inputs, list) else query_result.inputs[0]
         template_info = template["additional_information"]
         inputs = [
@@ -343,7 +358,8 @@ def _build_inputs(args) -> tuple[str, list]:
             for t in lines
         ]
     else:
-        inputs = query_result.inputs if isinstance(query_result.inputs, list) else [query_result.inputs]
+        base_inputs = query_result.inputs if isinstance(query_result.inputs, list) else [query_result.inputs]
+        inputs = [copy.deepcopy(base_inputs[i % len(base_inputs)]) for i in range(args.num_prompts)]
 
     return model_name, inputs
 
@@ -360,6 +376,12 @@ def _save_wav(output_dir: str, request_id: str, mm: dict) -> None:
     logger.info(f"Request ID: {request_id}, Saved audio to {out_wav}")
 
 
+def _stop_profiler_sync(omni: Omni, args) -> None:
+    omni.stop_profile(stages=args.profiler_stages)
+    logger.info("Waiting %ss for profiler traces to flush...", args.profiler_wait_secs)
+    time.sleep(args.profiler_wait_secs)
+
+
 def main(args):
     """Run offline inference with Omni."""
     model_name, inputs = _build_inputs(args)
@@ -374,12 +396,33 @@ def main(args):
         enable_diffusion_pipeline_profiler=args.enable_diffusion_pipeline_profiler,
     )
 
+    profiler_running = False
+    processed_count = 0
+    total_requests = len(inputs)
     batch_size = args.batch_size
-    for batch_start in range(0, len(inputs), batch_size):
-        batch = inputs[batch_start : batch_start + batch_size]
-        for stage_outputs in omni.generate(batch):
-            output = stage_outputs.request_output
-            _save_wav(output_dir, output.request_id, output.outputs[0].multimodal_output)
+    try:
+        if args.enable_profiler:
+            omni.start_profile(stages=args.profiler_stages)
+            profiler_running = True
+
+        for batch_start in range(0, len(inputs), batch_size):
+            batch = inputs[batch_start : batch_start + batch_size]
+            for stage_outputs in omni.generate(batch):
+                output = stage_outputs.request_output
+                _save_wav(output_dir, output.request_id, output.outputs[0].multimodal_output)
+                processed_count += 1
+                if profiler_running and processed_count >= total_requests:
+                    logger.info(
+                        "Processed %s/%s requests. Stopping profiler while workers are still active.",
+                        processed_count,
+                        total_requests,
+                    )
+                    _stop_profiler_sync(omni, args)
+                    profiler_running = False
+    finally:
+        if profiler_running:
+            _stop_profiler_sync(omni, args)
+        omni.close()
 
 
 async def main_streaming(args):
@@ -396,34 +439,66 @@ async def main_streaming(args):
         enable_diffusion_pipeline_profiler=args.enable_diffusion_pipeline_profiler,
     )
 
-    for i, prompt in enumerate(inputs):
-        request_id = str(i)
-        t_start = time.perf_counter()
-        t_prev = t_start
-        chunk_idx = 0
-        async for stage_output in omni.generate(prompt, request_id=request_id):
-            mm = stage_output.request_output.outputs[0].multimodal_output
-            if not stage_output.finished:
-                t_now = time.perf_counter()
-                audio = mm.get("audio")
-                n = len(audio) if isinstance(audio, list) else (0 if audio is None else 1)
-                dt_ms = (t_now - t_prev) * 1000
-                ttfa_ms = (t_now - t_start) * 1000
-                if chunk_idx == 0:
-                    logger.info(f"Request {request_id}: chunk {chunk_idx} samples={n} TTFA={ttfa_ms:.1f}ms")
+    profiler_running = False
+    processed_count = 0
+    total_requests = len(inputs)
+
+    try:
+        if args.enable_profiler:
+            await omni.start_profile(stages=args.profiler_stages)
+            profiler_running = True
+
+        for i, prompt in enumerate(inputs):
+            request_id = str(i)
+            t_start = time.perf_counter()
+            t_prev = t_start
+            chunk_idx = 0
+            async for stage_output in omni.generate(prompt, request_id=request_id):
+                mm = stage_output.request_output.outputs[0].multimodal_output
+                if not stage_output.finished:
+                    t_now = time.perf_counter()
+                    audio = mm.get("audio")
+                    n = len(audio) if isinstance(audio, list) else (0 if audio is None else 1)
+                    dt_ms = (t_now - t_prev) * 1000
+                    ttfa_ms = (t_now - t_start) * 1000
+                    if chunk_idx == 0:
+                        logger.info(f"Request {request_id}: chunk {chunk_idx} samples={n} TTFA={ttfa_ms:.1f}ms")
+                    else:
+                        logger.info(f"Request {request_id}: chunk {chunk_idx} samples={n} inter_chunk={dt_ms:.1f}ms")
+                    t_prev = t_now
+                    chunk_idx += 1
                 else:
-                    logger.info(f"Request {request_id}: chunk {chunk_idx} samples={n} inter_chunk={dt_ms:.1f}ms")
-                t_prev = t_now
-                chunk_idx += 1
-            else:
-                t_end = time.perf_counter()
-                total_ms = (t_end - t_start) * 1000
-                logger.info(f"Request {request_id}: done total={total_ms:.1f}ms chunks={chunk_idx}")
-                _save_wav(output_dir, request_id, mm)
+                    t_end = time.perf_counter()
+                    total_ms = (t_end - t_start) * 1000
+                    logger.info(f"Request {request_id}: done total={total_ms:.1f}ms chunks={chunk_idx}")
+                    _save_wav(output_dir, request_id, mm)
+                    processed_count += 1
+                    if profiler_running and processed_count >= total_requests:
+                        logger.info(
+                            "Processed %s/%s requests. Stopping profiler while workers are still active.",
+                            processed_count,
+                            total_requests,
+                        )
+                        await omni.stop_profile(stages=args.profiler_stages)
+                        logger.info("Waiting %ss for profiler traces to flush...", args.profiler_wait_secs)
+                        await asyncio.sleep(args.profiler_wait_secs)
+                        profiler_running = False
+    finally:
+        if profiler_running:
+            await omni.stop_profile(stages=args.profiler_stages)
+            logger.info("Waiting %ss for profiler traces to flush...", args.profiler_wait_secs)
+            await asyncio.sleep(args.profiler_wait_secs)
+        omni.shutdown()
 
 
 def parse_args():
     parser = FlexibleArgumentParser(description="Demo on using vLLM for offline inference with audio language models")
+    parser.add_argument(
+        "--model",
+        type=str,
+        default=None,
+        help="Override the default model name with a HuggingFace model ID or local path.",
+    )
     parser.add_argument(
         "--query-type",
         "-q",
@@ -540,12 +615,32 @@ def parse_args():
         action="store_true",
         help="Enable diffusion pipeline profiler to display stage durations.",
     )
+    parser.add_argument(
+        "--enable-profiler",
+        action="store_true",
+        default=False,
+        help="Enable worker profiling for the selected stages.",
+    )
+    parser.add_argument(
+        "--profiler-stages",
+        type=int,
+        nargs="*",
+        default=None,
+        help="List of stage IDs to profile. If unset, profiles all stages with profiler_config.",
+    )
+    parser.add_argument(
+        "--profiler-wait-secs",
+        type=int,
+        default=30,
+        help="Seconds to wait after stop_profile so traces can flush to disk.",
+    )
 
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     if args.streaming:
         asyncio.run(main_streaming(args))
     else:

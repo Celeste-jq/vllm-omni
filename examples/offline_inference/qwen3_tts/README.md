@@ -32,6 +32,14 @@ python end2end.py --query-type CustomVoice
 
 Generated audio files are saved to `output_audio/` by default.
 
+You can override the model with a HuggingFace model ID or local path:
+
+```bash
+python end2end.py \
+    --model /path/to/Qwen3-TTS-12Hz-1.7B-CustomVoice \
+    --query-type CustomVoice
+```
+
 ## Task Usage
 
 ### CustomVoice
@@ -101,6 +109,23 @@ TTFA, and can be overridden per-request via the `initial_codec_chunk_frames` API
 completes. This demonstrates that audio data is available progressively rather than only at the end.
 
 > **Note:** Streaming uses `AsyncOmni` internally. The non-streaming path (`Omni`) is unchanged.
+
+## Profiling
+
+Offline profiling now supports the same stage-level profiler hooks used by online serving. To profile on NPU, use a stage config that includes `profiler_config` and run:
+
+```bash
+ASCEND_RT_VISIBLE_DEVICES=0 python end2end.py \
+    --model /path/to/Qwen3-TTS-12Hz-1.7B-CustomVoice \
+    --query-type CustomVoice \
+    --stage-configs-path /path/to/qwen3_tts_profile.yaml \
+    --num-prompts 1 \
+    --enable-profiler \
+    --profiler-stages 0 1 \
+    --profiler-wait-secs 30
+```
+
+Stack capture is controlled from the stage config through `torch_profiler_with_stack: true`.
 
 ## Batched Decoding
 

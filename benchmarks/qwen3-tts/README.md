@@ -37,6 +37,72 @@ STAGE_CONFIG=vllm_omni/configs/qwen3_tts_bs16.yaml bash run_benchmark.sh --async
 
 # Custom GPU, prompt count, concurrency levels
 GPU_DEVICE=1 NUM_PROMPTS=20 CONCURRENCY="1 4" bash run_benchmark.sh
+
+# NPU online profiling with stack capture
+DEVICE_BACKEND=npu \
+DEVICE_ID=0 \
+MODEL=/path/to/Qwen3-TTS-12Hz-1.7B-CustomVoice \
+ENABLE_PROFILING=1 \
+PROFILER_WITH_STACK=1 \
+PROFILER_STAGES="0 1" \
+NUM_PROMPTS=1 \
+NUM_WARMUPS=0 \
+CONCURRENCY="1" \
+SKIP_PLOT=1 \
+bash run_benchmark.sh --async-only
+
+# Unified NPU profiling wrapper: online + offline
+MODEL=/path/to/Qwen3-TTS-12Hz-1.7B-CustomVoice \
+DEVICE_ID=0 \
+PROFILE_MODE=both \
+bash run_npu_profile.sh
+```
+
+## NPU Profiling
+
+`run_npu_profile.sh` is the fastest way to profile Qwen3-TTS on Ascend NPU.
+It supports:
+
+- `PROFILE_MODE=online`: start the OpenAI-compatible server, call `/start_profile`, run the serving benchmark, then call `/stop_profile`
+- `PROFILE_MODE=offline`: run `examples/offline_inference/qwen3_tts/end2end.py` with local `Omni` inference and profiler hooks
+- `PROFILE_MODE=both`: run both modes sequentially
+
+Stack capture is enabled by default through `PROFILER_WITH_STACK=1`. Set `PROFILER_WITH_STACK=0` only if you need to reduce profiling overhead.
+
+Recommended minimal run:
+
+```bash
+cd benchmarks/qwen3-tts
+
+MODEL=/path/to/Qwen3-TTS-12Hz-1.7B-CustomVoice \
+DEVICE_ID=0 \
+PROFILE_MODE=both \
+PROFILER_STAGES="0 1" \
+NUM_PROMPTS=1 \
+NUM_WARMUPS=0 \
+CONCURRENCY="1" \
+SKIP_PLOT=1 \
+bash run_npu_profile.sh
+```
+
+Useful environment variables:
+
+- `PROFILER_STAGES="0"`: profile Talker only
+- `PROFILER_STAGES="1"`: profile Code2Wav only
+- `PROFILER_STAGES="0 1"`: profile both stages
+- `OFFLINE_QUERY_TYPE=VoiceDesign|Base|CustomVoice`: choose offline demo task type
+- `OFFLINE_TXT_PROMPTS=/path/to/prompts.txt`: provide offline prompts from a file
+- `OFFLINE_STREAMING=1`: run offline profiling through `AsyncOmni` streaming mode
+- `PROFILE_WAIT_SECS=30`: wait after `stop_profile` so trace files can flush to disk
+
+After a run, you can analyze the NPU traces with:
+
+```python
+from torch_npu.profiler.profiler import analyse
+
+analyse("benchmarks/qwen3-tts/results/npu_profile/online/traces")
+# or
+analyse("benchmarks/qwen3-tts/results/npu_profile/offline/traces")
 ```
 
 ## Manual Steps
