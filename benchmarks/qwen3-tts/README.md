@@ -37,6 +37,62 @@ STAGE_CONFIG=vllm_omni/configs/qwen3_tts_bs4.yaml bash run_benchmark.sh --async-
 
 # Custom GPU, prompt count, concurrency levels
 GPU_DEVICE=1 NUM_PROMPTS=20 CONCURRENCY="1 4" bash run_benchmark.sh
+
+# NPU + local model path + profiler
+DEVICE_BACKEND=npu \
+DEVICE_ID=0 \
+MODEL=/path/to/Qwen3-TTS-12Hz-1.7B-CustomVoice \
+ENABLE_PROFILING=1 \
+PROFILER_DIR=./results/npu_profile \
+PROFILER_STAGES="0 1" \
+NUM_PROMPTS=2 \
+NUM_WARMUPS=0 \
+CONCURRENCY="1" \
+SKIP_PLOT=1 \
+bash run_benchmark.sh --async-only
+
+# Or use the NPU wrapper
+MODEL=/path/to/Qwen3-TTS-12Hz-1.7B-CustomVoice \
+bash run_npu_profile.sh
+```
+
+## NPU Profiling
+
+For Ascend NPU, the benchmark runner can inject `profiler_config` into the
+stage YAML and automatically call `/start_profile` and `/stop_profile`.
+
+Recommended minimal profiling setup:
+
+```bash
+cd benchmarks/qwen3-tts
+
+MODEL=/path/to/Qwen3-TTS-12Hz-1.7B-CustomVoice \
+DEVICE_ID=0 \
+PROFILER_STAGES="0 1" \
+PROFILER_DIR=./results/npu_profile \
+NUM_PROMPTS=1 \
+NUM_WARMUPS=0 \
+CONCURRENCY="1" \
+SKIP_PLOT=1 \
+bash run_npu_profile.sh
+```
+
+Notes:
+
+- `MODEL` can be either a HuggingFace model ID or a local model directory.
+- `PROFILER_STAGES="0"` profiles the Talker stage only; `"1"` profiles
+  Code2Wav only; `"0 1"` profiles both.
+- Stack capture is enabled by default through `torch_profiler_with_stack: true`.
+  Set `PROFILER_WITH_STACK=0` only if you need to reduce profiler overhead.
+- On NPU, the HuggingFace baseline is skipped automatically.
+- After `stop_profile`, the script waits 30 seconds by default so trace files
+  can flush to disk. Override with `PROFILE_WAIT_SECS`.
+- To analyze NPU traces offline:
+
+```python
+from torch_npu.profiler.profiler import analyse
+
+analyse("./results/npu_profile")
 ```
 
 ## Manual Steps
