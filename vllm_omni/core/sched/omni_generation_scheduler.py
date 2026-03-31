@@ -59,6 +59,25 @@ class OmniGenerationScheduler(VLLMScheduler):
         cached_prompt_token_ids: dict[str, list[int]] = {}
         cached_additional_information: dict[str, dict | None] = {}
 
+        # VoxCPM stage1 (VAE) async-chunk mode expects "one forward ~= one latent chunk".
+        # Our chunk transfer adapter appends one placeholder token per received SHM chunk,
+        # but this scheduler's fast path may batch multiple tokens into a single step.
+        # That causes VAE forward to run too few times (often only at the beginning/end),
+        # even though the adapter inbox continues to receive chunks.
+        #
+        # Cap scheduled tokens to 1 for VoxCPM stage1(VAE) so each scheduler tick advances
+        # exactly one latent chunk.
+        adapter_stage_id = (
+            getattr(self.chunk_transfer_adapter.connector, "stage_id", None) if self.chunk_transfer_adapter is not None else None
+        )
+        is_voxcpm_vae_stage1 = (
+            self.chunk_transfer_adapter is not None
+            and adapter_stage_id not in (None, 0)
+            and getattr(self.vllm_config.model_config, "async_chunk", False)
+            and getattr(self.vllm_config.model_config, "model_stage", None) == "vae"
+            and getattr(self.vllm_config.model_config, "model_arch", None) == "VoxCPMForConditionalGeneration"
+        )
+
         # Temporary queue: preserve waiting order, do not disturb non-diffusion requests
         skipped_waiting_requests = create_request_queue(self.policy)
         req_index = 0
@@ -98,6 +117,8 @@ class OmniGenerationScheduler(VLLMScheduler):
                     req_index += 1
                     continue
             num_new_tokens = min(required_tokens, token_budget)
+            if is_voxcpm_vae_stage1:
+                num_new_tokens = 1
             new_blocks = self.kv_cache_manager.allocate_slots(
                 request,
                 num_new_tokens,
@@ -165,6 +186,8 @@ class OmniGenerationScheduler(VLLMScheduler):
             # (allocate 1 placeholder if zero)
             required_tokens = max(len(request.prompt_token_ids), 1)
             num_new_tokens = min(required_tokens, token_budget)
+            if is_voxcpm_vae_stage1:
+                num_new_tokens = 1
             new_blocks = self.kv_cache_manager.allocate_slots(
                 request,
                 num_new_tokens,

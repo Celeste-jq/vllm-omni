@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 from pytest_mock import MockerFixture
+from vllm.v1.core.sched.interface import PauseState
 from vllm.v1.request import RequestStatus
 
 from vllm_omni.distributed.omni_connectors.transfer_adapter.base import OmniTransferAdapterBase
@@ -408,3 +409,93 @@ def test_generation_scheduler_calls_cleanup_on_finished(monkeypatch, mocker: Moc
     args, _ = cleanup_calls[0]
     assert args[0] == "req-s1"
     assert args[1] == "ext-s1"
+
+
+def test_generation_scheduler_caps_voxcpm_vae_stage1_to_one_token(
+    monkeypatch,
+    mocker: MockerFixture,
+):
+    """VoxCPM stage1 async_chunk must schedule exactly one placeholder token per tick."""
+    from vllm_omni.core.sched.omni_generation_scheduler import OmniGenerationScheduler
+
+    monkeypatch.setattr(
+        "vllm_omni.core.sched.omni_generation_scheduler.create_request_queue",
+        lambda _policy: DummyWaitingQueue(),
+    )
+
+    class _Blocks:
+        def get_block_ids(self):
+            return ([0],)
+
+    adapter_mock = mocker.MagicMock()
+    adapter_mock.connector.stage_id = 1
+    adapter_mock.finished_requests = set()
+    adapter_mock.process_pending_chunks.side_effect = lambda waiting, running: None
+    adapter_mock.restore_queues.side_effect = lambda waiting, running: None
+    adapter_mock.postprocess_scheduler_output.side_effect = lambda scheduler_output: None
+
+    request = _HashableRequest(
+        request_id="req-s1",
+        external_req_id="ext-s1",
+        status=RequestStatus.RUNNING,
+        is_finished=lambda: False,
+        num_computed_tokens=0,
+        num_prompt_tokens=5,
+        prompt_token_ids=[0, 0, 0, 0, 0],
+        num_output_placeholders=0,
+        sampling_params=None,
+        pooling_params=None,
+        stop_reason=None,
+        client_index=0,
+        take_events=lambda: [],
+        trace_headers=None,
+        num_cached_tokens=0,
+        num_external_computed_tokens=0,
+        num_nans_in_logits=0,
+        additional_information={"latent_audio_feat": torch.ones((1, 2, 4), dtype=torch.float32)},
+    )
+
+    scheduler = mocker.MagicMock()
+    scheduler.max_num_scheduled_tokens = 8
+    scheduler._pause_state = PauseState.UNPAUSED
+    scheduler.kv_cache_manager.new_step_starts.return_value = None
+    scheduler.kv_cache_manager.allocate_slots.return_value = _Blocks()
+    scheduler.kv_cache_manager.get_num_common_prefix_blocks.return_value = [0]
+    scheduler.chunk_transfer_adapter = adapter_mock
+    scheduler.requests = {"req-s1": request}
+    scheduler.running = [request]
+    scheduler.waiting = DummyWaitingQueue()
+    scheduler.max_num_running_reqs = 1
+    scheduler.log_stats = False
+    scheduler.num_lookahead_tokens = 0
+    scheduler.policy = "fcfs"
+    scheduler.use_v2_model_runner = False
+    scheduler._make_cached_request_data.return_value = SimpleNamespace(
+        req_ids=["req-s1"],
+        resumed_req_ids=[],
+        new_token_ids={"req-s1": [0]},
+        all_token_ids={"req-s1": [0, 0, 0, 0, 0]},
+        new_block_ids={"req-s1": [0]},
+        num_computed_tokens={"req-s1": 0},
+        num_output_tokens={"req-s1": 1},
+    )
+    scheduler.vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            async_chunk=True,
+            model_stage="vae",
+            model_arch="VoxCPMForConditionalGeneration",
+        )
+    )
+    scheduler.kv_cache_config = SimpleNamespace(kv_cache_groups=[object()])
+    scheduler.encoder_cache_manager.get_freed_mm_hashes.return_value = []
+    scheduler.finished_req_ids = set()
+    scheduler.prev_step_scheduled_req_ids = set()
+    scheduler.connector = None
+    scheduler.ec_connector = None
+    scheduler._update_after_schedule.side_effect = lambda _scheduler_output: None
+
+    scheduler_output = OmniGenerationScheduler.schedule(scheduler)
+
+    assert scheduler_output.num_scheduled_tokens["req-s1"] == 1
+    assert scheduler.kv_cache_manager.allocate_slots.call_count == 1
+    assert scheduler.kv_cache_manager.allocate_slots.call_args.args[1] == 1
