@@ -245,6 +245,7 @@ class TestFilterDataclassKwargs:
             "model": "dummy",
             "stage_id": 1,
             "engine_output_type": "image",
+            "voxcpm_vae_warmup": False,
             "unknown_field": "drop_me",
         }
 
@@ -253,6 +254,7 @@ class TestFilterDataclassKwargs:
         assert "model" in result
         assert "stage_id" in result
         assert "engine_output_type" in result
+        assert result["voxcpm_vae_warmup"] is False
         assert "unknown_field" not in result
 
     def test_filters_omni_diffusion_config_union_dataclass(self):

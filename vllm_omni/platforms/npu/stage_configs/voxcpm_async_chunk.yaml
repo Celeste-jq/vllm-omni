@@ -50,6 +50,8 @@ stage_args:
       async_scheduling: false
       enable_prefix_caching: false
       engine_output_type: audio
+      # Set false to disable the one-time VAE decoder warmup at model load.
+      voxcpm_vae_warmup: true
       gpu_memory_utilization: 0.1
       distributed_executor_backend: "mp"
       max_num_batched_tokens: 8192

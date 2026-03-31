@@ -583,6 +583,7 @@ def _load_native_voxcpm_audio_vae(
     model_path: str,
     *,
     device: torch.device,
+    warmup: bool = True,
 ) -> _DirectVoxCPMAudioVAE:
     AudioVAE, AudioVAEConfig = _import_voxcpm_audio_vae_classes()
     runtime_model_path = _prepare_runtime_model_dir(model_path, target_device=device, target_dtype="float32")
@@ -603,7 +604,8 @@ def _load_native_voxcpm_audio_vae(
     if device.type == "npu" and hasattr(torch, "npu"):
         torch.npu.set_device(device)
     runtime_vae = _DirectVoxCPMAudioVAE(audio_vae)
-    runtime_vae.warmup()
+    if warmup:
+        runtime_vae.warmup()
     return runtime_vae
 
 
@@ -645,6 +647,7 @@ class VoxCPMForConditionalGeneration(nn.Module):
             self._pipeline = _load_native_voxcpm_audio_vae(
                 self.model_path,
                 device=target_device,
+                warmup=bool(getattr(self.vllm_config.model_config, "voxcpm_vae_warmup", True)),
             )
         else:
             raise ValueError(

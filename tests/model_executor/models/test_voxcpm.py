@@ -2,6 +2,7 @@ import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 import types
 
 import pytest
@@ -419,3 +420,39 @@ def test_voxcpm_load_weights_uses_native_loader_without_consuming_iterator():
 
     assert loaded == set()
     assert load_calls == ["loaded"]
+
+
+def test_voxcpm_vae_loader_respects_warmup_flag(monkeypatch: pytest.MonkeyPatch):
+    model = VoxCPMForConditionalGeneration.__new__(VoxCPMForConditionalGeneration)
+    torch.nn.Module.__init__(model)
+    model.vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            model="dummy-model",
+            model_stage="vae",
+            voxcpm_vae_warmup=False,
+            dtype="float32",
+        )
+    )
+    model.model_stage = "vae"
+    model._pipeline = None
+
+    captured: dict[str, Any] = {}
+
+    monkeypatch.setattr(
+        "vllm_omni.model_executor.models.voxcpm.voxcpm._resolve_runtime_device",
+        lambda _cfg: torch.device("cpu"),
+    )
+    monkeypatch.setattr(
+        "vllm_omni.model_executor.models.voxcpm.voxcpm._load_native_voxcpm_audio_vae",
+        lambda model_path, *, device, warmup=True: captured.update(
+            {"model_path": model_path, "device": device, "warmup": warmup}
+        )
+        or "fake-vae",
+    )
+
+    model._ensure_model_loaded()
+
+    assert model._pipeline == "fake-vae"
+    assert captured["model_path"] == "dummy-model"
+    assert captured["device"] == torch.device("cpu")
+    assert captured["warmup"] is False

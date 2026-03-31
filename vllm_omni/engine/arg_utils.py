@@ -100,6 +100,7 @@ class OmniEngineArgs(EngineArgs):
     quantization_config: Any | None = None
     worker_type: str | None = None
     task_type: str | None = None
+    voxcpm_vae_warmup: bool = True
 
     def __post_init__(self) -> None:
         load_omni_general_plugins()
@@ -225,6 +226,7 @@ class OmniEngineArgs(EngineArgs):
             stage_connector_config=stage_connector_config,
             omni_kv_config=self.omni_kv_config,
             task_type=self.task_type,
+            voxcpm_vae_warmup=self.voxcpm_vae_warmup,
         )
         omni_config.hf_config.architectures = omni_config.architectures
 
@@ -263,6 +265,7 @@ class AsyncOmniEngineArgs(AsyncEngineArgs):
     quantization_config: Any | None = None
     worker_type: str | None = None
     task_type: str | None = None
+    voxcpm_vae_warmup: bool = True
 
     def __post_init__(self) -> None:
         load_omni_general_plugins()
@@ -388,6 +391,7 @@ class AsyncOmniEngineArgs(AsyncEngineArgs):
             stage_connector_config=stage_connector_config,
             omni_kv_config=self.omni_kv_config,
             task_type=self.task_type,
+            voxcpm_vae_warmup=self.voxcpm_vae_warmup,
         )
         omni_config.hf_config.architectures = omni_config.architectures
 
