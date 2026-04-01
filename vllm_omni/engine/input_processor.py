@@ -116,6 +116,21 @@ class OmniInputProcessor(InputProcessor):
             mm_registry=mm_registry,
         )
 
+    def _platform_validate_request(
+        self,
+        processed_inputs: ProcessorInputs,
+        params: SamplingParams | PoolingParams,
+    ) -> None:
+        """Compat shim for vLLM versions that do not expose platform validation.
+
+        Newer vLLM InputProcessor versions provide ``_platform_validate_request``.
+        Older versions do not. Omni should support both by delegating when the
+        base implementation exists and otherwise treating it as a no-op.
+        """
+        base_impl = getattr(super(), "_platform_validate_request", None)
+        if callable(base_impl):
+            base_impl(processed_inputs, params)
+
     def process_inputs(
         self,
         request_id: str,

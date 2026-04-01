@@ -1,4 +1,9 @@
-"""Offline VoxCPM AR streaming example for vLLM Omni."""
+"""Offline VoxCPM inference example for vLLM Omni.
+
+Supports both:
+- sync one-shot (Omni.generate)
+- streaming (AsyncOmni.generate with async_chunk config)
+"""
 
 from __future__ import annotations
 
@@ -17,10 +22,11 @@ os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
-from vllm_omni import AsyncOmni
+from vllm_omni import AsyncOmni, Omni
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-DEFAULT_STAGE_CONFIG = REPO_ROOT / "vllm_omni" / "model_executor" / "stage_configs" / "voxcpm.yaml"
+DEFAULT_STAGE_ASYNC = REPO_ROOT / "vllm_omni" / "model_executor" / "stage_configs" / "voxcpm.yaml"
+DEFAULT_STAGE_SYNC = REPO_ROOT / "vllm_omni" / "model_executor" / "stage_configs" / "voxcpm_no_async_chunk.yaml"
 
 logger = logging.getLogger(__name__)
 
@@ -70,8 +76,17 @@ def _extract_sample_rate(mm: dict[str, Any]) -> int:
     return int(sr_raw)
 
 
+def _save_wav(mm: dict[str, Any], output_dir: Path, request_id: str) -> Path:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_path = output_dir / f"output_{request_id}.wav"
+    sf.write(output_path, _extract_audio_tensor(mm).numpy(), _extract_sample_rate(mm), format="WAV")
+    return output_path
+
+
 def parse_args():
-    parser = FlexibleArgumentParser(description="Offline VoxCPM AR streaming inference with vLLM Omni")
+    parser = FlexibleArgumentParser(
+        description="Offline split-stage VoxCPM inference with vLLM Omni (auto sync/streaming by stage config)"
+    )
     parser.add_argument(
         "--model",
         type=str,
@@ -99,8 +114,8 @@ def parse_args():
     parser.add_argument(
         "--stage-configs-path",
         type=str,
-        default=str(DEFAULT_STAGE_CONFIG),
-        help="Stage config YAML path. Defaults to the AR streaming VoxCPM config.",
+        default=str(DEFAULT_STAGE_SYNC),
+        help="Stage config YAML path. Routing is selected only from this path.",
     )
     parser.add_argument(
         "--cfg-value",
@@ -164,9 +179,14 @@ def parse_args():
     if args.num_runs < 1:
         parser.error("--num-runs must be >= 1")
     if args.output_dir is None:
-        args.output_dir = "output_audio_streaming"
+        args.output_dir = "output_audio_streaming" if _is_streaming_stage_config(args.stage_configs_path) else "output_audio"
 
     return args
+
+
+def _is_streaming_stage_config(stage_configs_path: str) -> bool:
+    cfg_name = Path(stage_configs_path).name.lower()
+    return "no_async_chunk" not in cfg_name
 
 
 async def _run_streaming_single(
@@ -265,14 +285,57 @@ async def _run_streaming(args) -> list[Path]:
     return paths
 
 
+def _run_sync(args) -> list[Path]:
+    output_dir = Path(args.output_dir)
+
+    omni = Omni(
+        model=args.model,
+        stage_configs_path=args.stage_configs_path,
+        log_stats=args.log_stats,
+        stage_init_timeout=args.stage_init_timeout,
+    )
+
+    t_total = time.perf_counter()
+    saved_paths: list[Path] = []
+    for run in range(args.num_runs):
+        run_tag = f"sync_{uuid.uuid4().hex[:8]}"
+        prompt = _build_prompt(args, global_request_id=run_tag)
+        t_run = time.perf_counter()
+        if run == 0:
+            print(f"---prompt---:{prompt}")
+        run_paths: list[Path] = []
+        for stage_outputs in omni.generate([prompt]):
+            for j, output in enumerate(stage_outputs.request_output):
+                mm = output.outputs[0].multimodal_output
+                save_stem = f"run{run + 1}_{run_tag}" if j == 0 else f"run{run + 1}_{run_tag}_{j}"
+                run_paths.append(_save_wav(mm, output_dir, save_stem))
+        if not run_paths:
+            raise RuntimeError("No output from Omni.generate")
+        saved_paths.extend(run_paths)
+        print(
+            f"Saved (sync) run {run + 1}/{args.num_runs}: "
+            f"{len(run_paths)} file(s) ({time.perf_counter() - t_run:.2f}s)"
+        )
+        for path in run_paths:
+            print(f"  {path}")
+
+    total_elapsed = time.perf_counter() - t_total
+    print(f"All sync runs finished: {args.num_runs} run(s), {len(saved_paths)} file(s) in {total_elapsed:.2f}s total")
+    return saved_paths
+
+
 def main(args) -> None:
     logging.basicConfig(level=logging.INFO)
+    is_streaming = _is_streaming_stage_config(args.stage_configs_path)
     print(f"Model: {args.model}")
     print(f"Stage config: {args.stage_configs_path}")
-    print("Route: ar-streaming")
+    print(f"Route: {'streaming' if is_streaming else 'sync'} (from stage-configs-path)")
     print(f"Voice cloning: {'enabled' if args.ref_audio else 'disabled'}")
     print(f"Num runs: {args.num_runs}")
-    asyncio.run(_run_streaming(args))
+    if is_streaming:
+        asyncio.run(_run_streaming(args))
+    else:
+        _run_sync(args)
 
 
 if __name__ == "__main__":
