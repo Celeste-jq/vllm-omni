@@ -917,9 +917,7 @@ class VoxCPMForConditionalGeneration(nn.Module):
                     z_cont = [torch.tensor(0, dtype=torch.int32) for _ in infos]
                     z_ex = [torch.tensor(0, dtype=torch.int32) for _ in infos]
                     mm_empty["omni_stream_continue"] = z_cont
-                    mm_empty["latent_stream_continue"] = z_cont
                     mm_empty["omni_stream_gen_exhausted"] = z_ex
-                    mm_empty["latent_stream_gen_exhausted"] = z_ex
                 self._ar_emit_stop_token = True
                 return OmniOutput(
                     text_hidden_states=torch.zeros((0, 1), device=out_dev, dtype=out_dtype),
@@ -1039,10 +1037,8 @@ class VoxCPMForConditionalGeneration(nn.Module):
         mm: dict[str, Any] = {output_key: outputs, "sr": sample_rates}
         if stream_continues is not None:
             mm["omni_stream_continue"] = stream_continues
-            mm["latent_stream_continue"] = stream_continues
             assert gen_exhausted_flags is not None
             mm["omni_stream_gen_exhausted"] = gen_exhausted_flags
-            mm["latent_stream_gen_exhausted"] = gen_exhausted_flags
         if outputs:
             outputs_tensor = torch.stack(outputs)
             if outputs_tensor.ndim == 1:

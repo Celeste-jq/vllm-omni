@@ -87,12 +87,12 @@ Both pipelines use `async_chunk: true`, [`OmniChunkTransferAdapter`](../../../vl
 | Stage0 `worker_type` | `ar` | `ar` |
 | Stage0 scheduler | `OmniARScheduler` | `OmniARScheduler` |
 | What each Stage0 step produces | One speech-token frame (`audio_codes` in pooler) | One latent chunk (`latent_audio_feat`) |
-| “More chunks?” signal | Implicit via AR decode until EOS | Explicit: `omni_stream_continue` / `omni_stream_gen_exhausted` (legacy: `latent_stream_*`) in pooler; see [`omni_streaming_keys.py`](../../../vllm_omni/core/omni_streaming_keys.py) |
+| “More chunks?” signal | Implicit via AR decode until EOS | Explicit: `omni_stream_continue` / `omni_stream_gen_exhausted` in pooler; see [`omni_streaming_keys.py`](../../../vllm_omni/core/omni_streaming_keys.py) |
 | Stage1 scheduler | `OmniGenerationScheduler` | `OmniGenerationScheduler` |
 | Stage1 payload | speech codes + chunk context | latent chunk + optional sample rate |
 | Stage1 | Code2Wav | VAE decode (`trim_streaming_patch` trims overlap) |
 
-**Stage0→Stage1 payload contract (VoxCPM streaming):** `latent2vae_async_chunk` sends `latent_audio_feat`, optional `sr`, `code_predictor_codes: [0]`, and `finished` when the request is done, the stream no longer continues, or the generator is exhausted. Pooler flags are interpreted via `pooler_stream_continues` / `pooler_stream_gen_exhausted` (supports both `omni_*` and legacy `latent_stream_*` keys).
+**Stage0→Stage1 payload contract (VoxCPM streaming):** `latent2vae_async_chunk` sends `latent_audio_feat`, optional `sr`, `code_predictor_codes: [0]`, and `finished` when the request is done, the stream no longer continues, or the generator is exhausted. Pooler flags are interpreted via `pooler_stream_continues` / `pooler_stream_gen_exhausted`.
 
 ## Notes
 
