@@ -152,6 +152,29 @@ def test_latent2vae_async_chunk_uses_omni_stream_flags():
     assert out_last["finished"] is True
 
 
+def test_compute_logits_switches_between_continue_and_stop_tokens():
+    model = VoxCPMForConditionalGeneration.__new__(VoxCPMForConditionalGeneration)
+    torch.nn.Module.__init__(model)
+    model.vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            dtype=torch.float32,
+            get_vocab_size=lambda: 8,
+            hf_text_config=SimpleNamespace(vocab_size=8),
+        )
+    )
+
+    model._ar_emit_stop_token = False
+    logits_continue = model.compute_logits(torch.zeros((2, 1), dtype=torch.float32))
+    assert tuple(logits_continue.shape) == (2, 8)
+    assert torch.all(logits_continue[:, 2] < 0)
+    assert torch.all(logits_continue[:, 1] > 0)
+
+    model._ar_emit_stop_token = True
+    logits_stop = model.compute_logits(torch.zeros((1, 1), dtype=torch.float32))
+    assert float(logits_stop[0, 2]) > 0
+    assert float(logits_stop[0, 1]) == 0.0
+
+
 def test_latent2vae_wraps_stage_outputs():
     latent = torch.ones((3, 2, 4), dtype=torch.float32)
     stage_output = SimpleNamespace(

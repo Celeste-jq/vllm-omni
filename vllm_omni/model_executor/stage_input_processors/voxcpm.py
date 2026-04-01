@@ -64,7 +64,6 @@ def latent2vae_async_chunk(
 ) -> dict[str, Any] | None:
     """Stage-0 latent → stage-1 VAE under ``async_chunk`` (connector payload)."""
     del transfer_manager
-    request_id = getattr(request, "external_req_id", None) or getattr(request, "request_id", "")
     finished_request = bool(is_finished)
     if callable(getattr(request, "is_finished", None)):
         finished_request = finished_request or bool(request.is_finished())

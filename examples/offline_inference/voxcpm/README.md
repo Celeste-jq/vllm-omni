@@ -1,10 +1,10 @@
 # VoxCPM
 
-This directory contains the minimal offline example for running native VoxCPM in vLLM Omni on the `pure_voxcpm` branch.
+This directory contains the offline AR-streaming example for running native VoxCPM in vLLM Omni.
 
 It covers:
 
-- split-stage inference with `vllm_omni/model_executor/stage_configs/voxcpm.yaml`
+- split-stage AR streaming with `vllm_omni/model_executor/stage_configs/voxcpm.yaml`
 - text-only synthesis
 - voice cloning with `ref_audio` + `ref_text`
 
@@ -43,6 +43,7 @@ Text-only synthesis:
 ```bash
 python examples/offline_inference/voxcpm/end2end.py \
   --model "$VOXCPM_MODEL" \
+  --stage-configs-path vllm_omni/model_executor/stage_configs/voxcpm.yaml \
   --text "This is a split-stage VoxCPM synthesis example running on vLLM Omni."
 ```
 
@@ -51,35 +52,35 @@ Voice cloning:
 ```bash
 python examples/offline_inference/voxcpm/end2end.py \
   --model "$VOXCPM_MODEL" \
+  --stage-configs-path vllm_omni/model_executor/stage_configs/voxcpm.yaml \
   --text "This sentence is synthesized with a cloned voice." \
   --ref-audio /path/to/reference.wav \
   --ref-text "Transcript of the reference audio."
 ```
 
-Generated audio is saved to `output_audio/` by default.
+Generated audio is saved to `output_audio_streaming/` by default.
 
 ## Useful Arguments
 
-- `--stage-configs-path`: override the split-stage config path explicitly
+- `--stage-configs-path`: override the AR streaming stage config path explicitly
 - `--cfg-value`: guidance value passed to VoxCPM
 - `--inference-timesteps`: number of diffusion timesteps
 - `--min-len`: minimum token length
 - `--max-new-tokens`: maximum token length
+- `--streaming-prefix-len`: latent overlap window used by streaming decode
+- `--num-runs`: repeat the same request multiple times for quick stability checks
 
-## Omni async_chunk vs Qwen3-TTS (same transport, different Stage0 semantics)
+## AR Streaming Design
 
-Both pipelines use `async_chunk: true`, [`OmniChunkTransferAdapter`](../../../vllm_omni/distributed/omni_connectors/transfer_adapter/chunk_transfer_adapter.py), `SharedMemoryConnector`, and a `custom_process_next_stage_input_func` to build the Stage0→Stage1 payload (`code_predictor_codes`, `finished`, plus modality-specific fields).
+VoxCPM streaming uses `async_chunk: true`, [`OmniChunkTransferAdapter`](../../../vllm_omni/distributed/omni_connectors/transfer_adapter/chunk_transfer_adapter.py), `SharedMemoryConnector`, and a `custom_process_next_stage_input_func` to move latent chunks from Stage0 to Stage1.
 
-| Aspect | Qwen3-TTS | VoxCPM |
-|--------|-----------|--------|
-| Stage0 `worker_type` | `ar` (connector merges payloads across AR steps) | `generation` (each chunk replaces `prompt_token_ids` for Stage1) |
-| Stage0 scheduler | `OmniARScheduler` | `OmniGenerationScheduler` |
-| What each Stage0 step produces | One speech-token frame (`audio_codes` in pooler) | One latent window from an internal iterator (`latent_audio_feat`) |
-| “More chunks?” signal | Implicit via AR decode until EOS | Explicit: `omni_stream_continue` / `omni_stream_gen_exhausted` (legacy: `latent_stream_*`) in pooler; see [`omni_streaming_keys.py`](../../../vllm_omni/core/omni_streaming_keys.py) |
-| Connector `codec_streaming` | `true` + frame windowing in [`talker2code2wav_async_chunk`](../../../vllm_omni/model_executor/stage_input_processors/qwen3_tts.py) | `false` — each chunk is a full latent for VAE ([`latent2vae_async_chunk`](../../../vllm_omni/model_executor/stage_input_processors/voxcpm.py)) |
-| Stage1 | Code2Wav | VAE decode (`trim_streaming_patch` trims overlap) |
+- Stage0 `latent_generator` now runs as `worker_type: ar` with `OmniARScheduler`.
+- Stage1 keeps `worker_type: generation` because it only decodes each latent chunk through the VAE.
+- Stage0 emits `latent_audio_feat` plus `omni_stream_continue` / `omni_stream_gen_exhausted` (legacy aliases `latent_stream_*` are still accepted).
+- [`latent2vae_async_chunk`](../../../vllm_omni/model_executor/stage_input_processors/voxcpm.py) forwards `latent_audio_feat`, optional `sr`, `code_predictor_codes: [0]`, and `finished` to Stage1.
+- Stage1 trims the overlap introduced by the streaming latent window via `trim_streaming_patch`.
 
-**Stage0→Stage1 payload contract (VoxCPM streaming):** `latent2vae_async_chunk` sends `latent_audio_feat`, optional `sr`, `code_predictor_codes: [0]`, and `finished` when the request is done, the stream no longer continues, or the generator is exhausted. Pooler flags are interpreted via `pooler_stream_continues` / `pooler_stream_gen_exhausted` (supports both `omni_*` and legacy `latent_stream_*` keys).
+**Stage0→Stage1 payload contract:** `finished` becomes `true` when the request ends, `omni_stream_continue` becomes false, or the latent iterator is exhausted.
 
 ## Notes
 
