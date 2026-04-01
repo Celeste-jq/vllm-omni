@@ -21,32 +21,15 @@ import torch
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
 from vllm.utils.argparse_utils import FlexibleArgumentParser
-from vllm.v1.engine.input_processor import InputProcessor as VLLMInputProcessor
 
 from vllm_omni import AsyncOmni, Omni
-from vllm_omni.engine.input_processor import OmniInputProcessor
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
+
 DEFAULT_STAGE_ASYNC = REPO_ROOT / "vllm_omni" / "model_executor" / "stage_configs" / "voxcpm.yaml"
 DEFAULT_STAGE_SYNC = REPO_ROOT / "vllm_omni" / "model_executor" / "stage_configs" / "voxcpm_no_async_chunk.yaml"
 
 logger = logging.getLogger(__name__)
-
-
-def _ensure_omni_input_processor_compat() -> None:
-    """Patch OmniInputProcessor for older vLLM builds missing platform validation."""
-    if hasattr(OmniInputProcessor, "_platform_validate_request"):
-        return
-
-    base_impl = getattr(VLLMInputProcessor, "_platform_validate_request", None)
-    if callable(base_impl):
-        setattr(OmniInputProcessor, "_platform_validate_request", base_impl)
-        return
-
-    def _noop_platform_validate_request(self, processed_inputs, params) -> None:
-        del self, processed_inputs, params
-
-    setattr(OmniInputProcessor, "_platform_validate_request", _noop_platform_validate_request)
 
 
 def _build_prompt(args, *, global_request_id: str | None = None) -> dict[str, Any]:
@@ -344,7 +327,6 @@ def _run_sync(args) -> list[Path]:
 
 def main(args) -> None:
     logging.basicConfig(level=logging.INFO)
-    _ensure_omni_input_processor_compat()
     is_streaming = _is_streaming_stage_config(args.stage_configs_path)
     print(f"Model: {args.model}")
     print(f"Stage config: {args.stage_configs_path}")
