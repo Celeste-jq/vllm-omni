@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Canonical pooler keys for generation-stage multi-step streaming (e.g. VoxCPM latent chunks).
+"""Canonical pooler keys for multi-step upstream streaming signals.
 
-Aligned with the Qwen3-TTS async_chunk pattern: same ``OmniChunkTransferAdapter`` and
-``custom_process_next_stage_input_func``, but Stage0 may be non-AR and must signal whether
-more chunks follow. Downstream reads ``omni_stream_*`` first, then legacy ``latent_stream_*``.
+VoxCPM uses these flags on the Stage0 AR latent generator to tell the stage-input
+processor whether more latent chunks follow. Downstream code reads ``omni_stream_*``
+first, then legacy ``latent_stream_*`` aliases.
 """
 
 from __future__ import annotations
