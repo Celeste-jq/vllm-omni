@@ -497,6 +497,11 @@ class OmniGenerationScheduler(VLLMScheduler):
                 )
                 if self.chunk_transfer_adapter is not None:
                     self.chunk_transfer_adapter.save_async(pooler_output, request)
+                if (
+                    self.chunk_transfer_adapter is not None
+                    and getattr(self.chunk_transfer_adapter.connector, "stage_id", None) not in (None, 0)
+                ):
+                    self.chunk_transfer_adapter.after_latent_chunk_consumed(request)
             else:
                 # Invariant: EngineCore returns no partial prefill outputs.
                 assert not prompt_logprobs_tensors

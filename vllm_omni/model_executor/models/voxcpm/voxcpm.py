@@ -937,6 +937,20 @@ class VoxCPMForConditionalGeneration(nn.Module):
         for info in infos:
             if self.model_stage in self._VAE_STAGES:
                 latent_audio_feat = self._extract_val(info, "latent_audio_feat", None)
+                chunk_index = self._extract_val(info, "_latent_chunk_count", None)
+                chunk_time_patches = None
+                if isinstance(latent_audio_feat, torch.Tensor):
+                    if latent_audio_feat.ndim == 3:
+                        chunk_time_patches = int(latent_audio_feat.shape[0])
+                    elif latent_audio_feat.ndim == 2:
+                        chunk_time_patches = int(latent_audio_feat.shape[1])
+                    elif latent_audio_feat.ndim >= 1:
+                        chunk_time_patches = int(latent_audio_feat.shape[0])
+                logger.info(
+                    "[VoxCPM stream] VAE decode chunk start (chunk_index=%s, chunk_time_patches=%s)",
+                    chunk_index,
+                    chunk_time_patches,
+                )
                 audio_tensor = self._pipeline.decode(
                     latent_audio_feat,
                     trim_streaming_patch=async_chunk,

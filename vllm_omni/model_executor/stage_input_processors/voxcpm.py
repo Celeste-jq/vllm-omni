@@ -4,9 +4,23 @@ from typing import Any
 
 import torch
 from vllm.inputs import TextPrompt
+from vllm.logger import init_logger
 
 from vllm_omni.core.omni_streaming_keys import pooler_stream_continues, pooler_stream_gen_exhausted
 from vllm_omni.inputs.data import OmniTokensPrompt
+
+logger = init_logger(__name__)
+
+
+def _latent_chunk_time_patches(latent: Any) -> int | None:
+    if isinstance(latent, torch.Tensor):
+        if latent.ndim == 3:
+            return int(latent.shape[0])
+        if latent.ndim == 2:
+            return int(latent.shape[1])
+        if latent.ndim >= 1:
+            return int(latent.shape[0])
+    return None
 
 
 def latent2vae(
@@ -93,6 +107,12 @@ def latent2vae_async_chunk(
     # Last chunk: no continuation flag (or explicit zero). ``gen_exhausted`` mirrors is_last on the
     # latent generator (StopIteration is skipped because we pop the gen when is_last).
     payload_finished = finished_request or not streaming_more or gen_exhausted
+    logger.info(
+        "[VoxCPM stream] Stage-0 latent chunk send (time_patches=%s, has_more=%s, shm_finished=%s)",
+        _latent_chunk_time_patches(latent),
+        streaming_more,
+        bool(payload_finished),
+    )
     sr = pooling_output.get("sr")
     out: dict[str, Any] = {
         "code_predictor_codes": [0],

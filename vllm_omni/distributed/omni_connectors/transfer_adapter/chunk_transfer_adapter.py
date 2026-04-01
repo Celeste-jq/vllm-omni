@@ -82,6 +82,7 @@ class OmniChunkTransferAdapter(OmniTransferAdapterBase):
         self.waiting_for_chunk_waiting_requests: deque[Any] = deque()
         self.waiting_for_chunk_running_requests: deque[Any] = deque()
         self.requests_with_ready_chunks = set()
+        self._latent_chunk_inbox: dict[str, deque[dict[str, Any]]] = defaultdict(deque)
 
     @classmethod
     def create_connector(cls, model_config: Any):
@@ -119,6 +120,11 @@ class OmniChunkTransferAdapter(OmniTransferAdapterBase):
         if not hasattr(request, "additional_information"):
             request.additional_information = None
         self._cancelled_load_reqs.discard(request.request_id)
+        rid = request.request_id
+        if any(getattr(r, "request_id", None) == rid for r in self._pending_load_reqs):
+            with self._recv_cond:
+                self._recv_cond.notify()
+            return
         self._pending_load_reqs.append(request)
         with self._recv_cond:
             self._recv_cond.notify()
@@ -145,6 +151,23 @@ class OmniChunkTransferAdapter(OmniTransferAdapterBase):
         self._pending_save_reqs.append(task)
         with self._save_cond:
             self._save_cond.notify()
+
+    def _has_latent_inbox(self, request: Request) -> bool:
+        ext = getattr(request, "external_req_id", None) or request.request_id
+        q = self._latent_chunk_inbox.get(ext)
+        return bool(q)
+
+    def after_latent_chunk_consumed(self, request: Request) -> None:
+        if self.connector.stage_id == 0:
+            return
+        ext = getattr(request, "external_req_id", None) or request.request_id
+        q = self._latent_chunk_inbox.get(ext)
+        if not q:
+            return
+        q.popleft()
+        if q:
+            request.additional_information = dict(q[0])
+            self.requests_with_ready_chunks.add(request.request_id)
 
     def _poll_single_request(self, request: Request):
         stage_id = self.connector.stage_id
@@ -183,23 +206,61 @@ class OmniChunkTransferAdapter(OmniTransferAdapterBase):
                 if _fin_ok:
                     self.finished_requests.add(req_id)
 
-                new_ids = payload_data.get("code_predictor_codes", [])
-                request.prompt_token_ids = new_ids
-                # Pass additional fields (like left_context_size) to the request
-                # Only pass chunk context metadata in additional_information
-                request.additional_information = {}
-                if "left_context_size" in payload_data:
-                    request.additional_information["left_context_size"] = payload_data["left_context_size"]
                 if "latent_audio_feat" in payload_data:
-                    request.additional_information["latent_audio_feat"] = payload_data["latent_audio_feat"]
-                if "sr" in payload_data:
-                    request.additional_information["sample_rate"] = payload_data["sr"]
-                request.num_computed_tokens = 0
+                    prev_meta = self.request_payload.get(external_req_id) or {}
+                    chunk_count = int(prev_meta.get("_latent_chunk_count", 0)) + 1
+                    self.request_payload[external_req_id] = {
+                        "_latent_chunk_count": chunk_count,
+                    }
 
-                # Empty chunk with more data expected: keep polling.
-                if not new_ids and not _fin_ok:
-                    if "latent_audio_feat" not in payload_data:
-                        return True
+                    chunk_dict = dict(payload_data)
+                    chunk_dict["_latent_chunk_count"] = chunk_count
+                    self._latent_chunk_inbox[external_req_id].append(chunk_dict)
+                    request.additional_information = dict(self._latent_chunk_inbox[external_req_id][0])
+                    if not getattr(request, "prompt_token_ids", None):
+                        request.prompt_token_ids = [0]
+                        request.num_computed_tokens = 0
+                    else:
+                        request.prompt_token_ids.append(0)
+
+                    cur_latent = payload_data.get("latent_audio_feat")
+                    n_time = None
+                    if isinstance(cur_latent, torch.Tensor):
+                        if cur_latent.ndim == 3:
+                            n_time = int(cur_latent.shape[0])
+                        elif cur_latent.ndim == 2:
+                            n_time = int(cur_latent.shape[1])
+                        elif cur_latent.ndim >= 1:
+                            n_time = int(cur_latent.shape[0])
+                    logger.info(
+                        "[VoxCPM stream] Stage-%s received latent chunk (key=%s, finished=%s, "
+                        "chunk_time_patches=%s, chunk_index=%s, inbox_depth=%s)",
+                        stage_id,
+                        connector_get_key,
+                        _fin_ok,
+                        n_time,
+                        chunk_count,
+                        len(self._latent_chunk_inbox[external_req_id]),
+                    )
+                    if not _fin_ok:
+                        self._pending_load_reqs.append(request)
+                        with self._recv_cond:
+                            self._recv_cond.notify()
+                else:
+                    new_ids = payload_data.get("code_predictor_codes", [])
+                    request.prompt_token_ids = new_ids
+                    request.additional_information = {}
+                    if "left_context_size" in payload_data:
+                        request.additional_information["left_context_size"] = payload_data["left_context_size"]
+                    if "latent_audio_feat" in payload_data:
+                        request.additional_information["latent_audio_feat"] = payload_data["latent_audio_feat"]
+                    if "sr" in payload_data:
+                        request.additional_information["sample_rate"] = payload_data["sr"]
+                    request.num_computed_tokens = 0
+
+                    if not new_ids and not _fin_ok:
+                        if "latent_audio_feat" not in payload_data:
+                            return True
 
             # Mark as finished for consumption
             self._finished_load_reqs.add(req_id)
@@ -271,7 +332,15 @@ class OmniChunkTransferAdapter(OmniTransferAdapterBase):
 
         if success:
             self.put_req_chunk[external_req_id] += 1
-            logger.debug(f"[Stage-{stage_id}] Sent {connector_put_key}")
+            if payload_data.get("latent_audio_feat") is not None:
+                logger.info(
+                    "[VoxCPM stream] Stage-%s sent latent chunk %s (key=%s)",
+                    stage_id,
+                    chunk_id,
+                    connector_put_key,
+                )
+            else:
+                logger.debug(f"[Stage-{stage_id}] Sent {connector_put_key}")
 
         if is_finished:
             self.cleanup_sender(external_req_id)
@@ -332,6 +401,7 @@ class OmniChunkTransferAdapter(OmniTransferAdapterBase):
 
         self.cleanup_receiver(request_id)
         self.cleanup_sender(external_req_id)
+        self._latent_chunk_inbox.pop(external_req_id, None)
 
     ########################################################################
     # Schedule Helper
@@ -409,6 +479,17 @@ class OmniChunkTransferAdapter(OmniTransferAdapterBase):
                 if request.request_id in self.requests_with_ready_chunks:
                     # Requests that have loaded chunk from last round
                     # of schedule, but have not scheduled
+                    continue
+                if (
+                    self.connector.stage_id != 0
+                    and self.model_mode != "ar"
+                    and self._has_latent_inbox(request)
+                ):
+                    ext = getattr(request, "external_req_id", None) or request.request_id
+                    q = self._latent_chunk_inbox.get(ext)
+                    if q:
+                        request.additional_information = dict(q[0])
+                    self.requests_with_ready_chunks.add(request.request_id)
                     continue
                 if request.request_id in self.finished_requests:
                     continue
