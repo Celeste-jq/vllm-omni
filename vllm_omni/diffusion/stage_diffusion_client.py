@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any
 
 from vllm.logger import init_logger
 
+from vllm_omni.diffusion.data import DiffusionRequestAbortedError
 from vllm_omni.engine.stage_init_utils import StageMetadata
 from vllm_omni.entrypoints.async_omni_diffusion import AsyncOmniDiffusion
 from vllm_omni.outputs import OmniRequestOutput
@@ -74,6 +75,20 @@ class StageDiffusionClient:
         try:
             result = await self._engine.generate(prompt, sampling_params, request_id)
             await self._output_queue.put(result)
+        except asyncio.CancelledError:
+            logger.info(
+                "[StageDiffusionClient] Stage-%s req=%s cancelled",
+                self.stage_id,
+                request_id,
+            )
+            raise
+        except DiffusionRequestAbortedError as e:
+            logger.info(
+                "[StageDiffusionClient] Stage-%s req=%s aborted: %s",
+                self.stage_id,
+                request_id,
+                e,
+            )
         except Exception as e:
             logger.exception(
                 "[StageDiffusionClient] Stage-%s req=%s failed: %s",
@@ -138,6 +153,7 @@ class StageDiffusionClient:
             task = self._tasks.pop(rid, None)
             if task:
                 task.cancel()
+        await self._engine.abort(request_ids)
 
     async def collective_rpc_async(
         self,
@@ -186,23 +202,17 @@ class StageDiffusionClient:
                 return await asyncio.wait_for(result, timeout=timeout)
             return await result
 
-        if method in {"sleep", "wake_up"}:
-            loop = asyncio.get_running_loop()
-            return await loop.run_in_executor(
-                self._engine._executor,
-                self._engine.engine.collective_rpc,
-                method,
-                timeout,
-                args,
-                kwargs,
-                None,
-            )
-
-        return {
-            "supported": False,
-            "todo": True,
-            "reason": f"Diffusion stage collective_rpc method {method} is not implemented yet",
-        }
+        # Fall back to collective RPC for other methods
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            self._engine._executor,
+            self._engine.engine.collective_rpc,
+            method,
+            timeout,
+            args,
+            kwargs,
+            None,
+        )
 
     def shutdown(self) -> None:
         for task in self._tasks.values():
