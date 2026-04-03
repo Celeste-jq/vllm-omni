@@ -241,7 +241,7 @@ def parse_args():
         "--jsonl-prompts",
         type=str,
         default=None,
-        help="Path to a .jsonl file. Each line must contain at least {'text': ...}; clone rows can also set ref_audio/ref_text.",
+        help="Path to a .jsonl file. Each line must contain at least {'text': ...}; clone rows can also set ref_audio/ref_text, and ref_text must be the real transcript of ref_audio.",
     )
     parser.add_argument(
         "--ref-audio",
@@ -253,7 +253,7 @@ def parse_args():
         "--ref-text",
         type=str,
         default=None,
-        help="Transcript of the reference audio.",
+        help="Real transcript of the reference audio. Placeholder text or mismatched text will usually produce noisy/electronic clone audio.",
     )
     parser.add_argument(
         "--stage-configs-path",
@@ -531,6 +531,8 @@ def main(args) -> None:
     print(f"Prompt count: {len(args.prompt_specs)}")
     print(f"Batch size: {args.batch_size}")
     print(f"Voice cloning prompts: {voice_clone_count}/{len(args.prompt_specs)}")
+    if voice_clone_count:
+        print("Voice cloning note: --ref-text/ref_text must match the spoken content of the reference audio.")
     print(f"Num runs: {args.num_runs}")
     if is_streaming:
         asyncio.run(_run_streaming(args))

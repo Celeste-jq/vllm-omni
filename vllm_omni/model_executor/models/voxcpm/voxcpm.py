@@ -128,8 +128,12 @@ def _make_voxcpm_model_for_omni(base: Type[Any]) -> Type[Any]:
     class VoxCPMModelForOmni(base):
         @torch.inference_mode()
         def build_prompt_cache(self, *args: Any, **kwargs: Any):
-            with _patch_torchaudio_load_with_soundfile():
+            try:
                 return super().build_prompt_cache(*args, **kwargs)
+            except (ImportError, ModuleNotFoundError) as exc:
+                if not _is_torchcodec_load_error(exc):
+                    raise
+                return _build_prompt_cache_with_soundfile(self, *args, **kwargs)
 
         @torch.inference_mode()
         def _inference(
@@ -457,47 +461,66 @@ def _force_cuda_available_for_npu(device: torch.device):
         yield
 
 
-@contextmanager
-def _patch_torchaudio_load_with_soundfile():
-    """Use soundfile-backed loading to avoid torchaudio's torchcodec dependency."""
+def _is_torchcodec_load_error(exc: BaseException) -> bool:
+    message = str(exc).lower()
+    return "torchcodec" in message or "load_with_torchcodec" in message
+
+
+def _load_audio_with_soundfile(
+    prompt_wav_path: str,
+    *,
+    sample_rate: int,
+) -> torch.Tensor:
     try:
         import soundfile as sf
-        import torchaudio
     except ImportError:
-        yield
-        return
+        raise
 
-    def _load_with_soundfile(
-        uri: Any,
-        frame_offset: int = 0,
-        num_frames: int = -1,
-        normalize: bool = True,
-        channels_first: bool = True,
-        format: str | None = None,
-        buffer_size: int = 4096,
-        backend: str | None = None,
-    ) -> tuple[torch.Tensor, int]:
-        del normalize, format, buffer_size, backend
+    audio_np, source_sr = sf.read(prompt_wav_path, dtype="float32", always_2d=True)
+    audio = torch.from_numpy(np.ascontiguousarray(audio_np.T))
 
-        audio, sample_rate = sf.read(uri, dtype="float32", always_2d=False)
-        audio_np = np.asarray(audio, dtype=np.float32)
+    if audio.size(0) > 1:
+        audio = audio.mean(dim=0, keepdim=True)
 
-        start = max(int(frame_offset), 0)
-        stop = None if num_frames is None or int(num_frames) < 0 else start + int(num_frames)
-        audio_np = audio_np[start:stop]
+    if int(source_sr) != int(sample_rate):
+        try:
+            import torchaudio
+        except ImportError as exc:
+            raise ImportError("torchaudio is required for resampling prompt audio.") from exc
+        audio = torchaudio.functional.resample(audio, int(source_sr), int(sample_rate))
 
-        if audio_np.ndim == 1:
-            audio_np = audio_np[None, :] if channels_first else audio_np[:, None]
-        elif audio_np.ndim == 2:
-            if channels_first:
-                audio_np = audio_np.T
-        else:
-            raise ValueError(f"Unsupported audio shape from soundfile: {audio_np.shape}")
+    return audio
 
-        return torch.from_numpy(np.ascontiguousarray(audio_np)), int(sample_rate)
 
-    with patch.object(torchaudio, "load", new=_load_with_soundfile):
-        yield
+def _build_prompt_cache_with_soundfile(model: Any, *args: Any, **kwargs: Any) -> dict[str, Any]:
+    if args:
+        prompt_text = args[0]
+        prompt_wav_path = args[1] if len(args) > 1 else kwargs.get("prompt_wav_path")
+    else:
+        prompt_text = kwargs.get("prompt_text")
+        prompt_wav_path = kwargs.get("prompt_wav_path")
+
+    if not prompt_text or not prompt_wav_path:
+        raise ValueError("prompt_text and prompt_wav_path are required")
+
+    audio = _load_audio_with_soundfile(prompt_wav_path, sample_rate=int(model.sample_rate))
+
+    patch_len = model.patch_size * model.chunk_size
+    if audio.size(1) % patch_len != 0:
+        padding_size = patch_len - audio.size(1) % patch_len
+        audio = torch.nn.functional.pad(audio, (padding_size, 0))
+
+    audio_feat = model.audio_vae.encode(audio.to(model.device), model.sample_rate).cpu()
+    audio_feat = audio_feat.view(
+        model.audio_vae.latent_dim,
+        -1,
+        model.patch_size,
+    ).permute(1, 2, 0)
+
+    return {
+        "prompt_text": prompt_text,
+        "audio_feat": audio_feat,
+    }
 
 
 class _DirectVoxCPMLatentGenerator:

@@ -57,8 +57,10 @@ python examples/offline_inference/voxcpm/end2end.py \
   --model "$VOXCPM_MODEL" \
   --text "This sentence is synthesized with a cloned voice." \
   --ref-audio /path/to/reference.wav \
-  --ref-text "Transcript of the reference audio."
+  --ref-text "The exact transcript spoken in reference.wav."
 ```
+
+`--ref-text` must be the real transcript of the reference audio. Placeholder text, summary text, or mismatched text will usually degrade clone quality badly and can produce noisy/electronic output.
 
 Text batch (`--txt-prompts`, one text per line):
 
@@ -76,7 +78,7 @@ python examples/offline_inference/voxcpm/end2end.py \
   --model "$VOXCPM_MODEL" \
   --txt-prompts /path/to/prompts.txt \
   --ref-audio /path/to/reference.wav \
-  --ref-text "Transcript of the reference audio." \
+  --ref-text "The exact transcript spoken in reference.wav." \
   --batch-size 4
 ```
 
@@ -124,7 +126,7 @@ For voice cloning rows, provide `ref_audio` and `ref_text` together:
 
 ```json
 {"text": "Text-only row"}
-{"text": "Clone row", "ref_audio": "/path/to/ref.wav", "ref_text": "Reference transcript."}
+{"text": "Clone row", "ref_audio": "/path/to/ref.wav", "ref_text": "The exact transcript spoken in ref.wav."}
 ```
 
 ## Useful Arguments
