@@ -122,6 +122,7 @@ Generated audio is saved to `output_audio/` by default for non-streaming, and to
 
 The same batch flags also work with the streaming stage config. In streaming mode,
 `--batch-size` controls how many requests are launched concurrently in each wave.
+The script also prints `ttfa` for each saved result, so you can compare first-audio latency between sync and streaming configs directly.
 
 ## Batch Input Formats
 
