@@ -215,6 +215,10 @@ def _count_voice_clone_prompts(prompt_specs: list[PromptSpec]) -> int:
     return sum(1 for spec in prompt_specs if spec.ref_audio is not None)
 
 
+def _get_warmup_specs(prompt_specs: list[PromptSpec], batch_size: int) -> list[PromptSpec]:
+    return prompt_specs[: min(len(prompt_specs), batch_size)]
+
+
 def parse_args():
     parser = FlexibleArgumentParser(
         description="Offline split-stage VoxCPM inference with vLLM Omni (auto sync/streaming by stage config)"
@@ -320,6 +324,12 @@ def parse_args():
         default=1,
         help="Number of requests submitted together. In streaming mode this is also the per-wave concurrency.",
     )
+    parser.add_argument(
+        "--warmup-runs",
+        type=int,
+        default=0,
+        help="Optional number of warmup passes before measured runs. Warmup uses only the first batch and does not save outputs.",
+    )
     args = parser.parse_args()
 
     if not args.model:
@@ -332,6 +342,8 @@ def parse_args():
         parser.error("--num-runs must be >= 1")
     if args.batch_size < 1:
         parser.error("--batch-size must be >= 1")
+    if args.warmup_runs < 0:
+        parser.error("--warmup-runs must be >= 0")
     if args.output_dir is None:
         args.output_dir = "output_audio_streaming" if _is_streaming_stage_config(args.stage_configs_path) else "output_audio"
     try:
@@ -350,18 +362,17 @@ def _is_streaming_stage_config(stage_configs_path: str) -> bool:
     return "no_async_chunk" not in cfg_name
 
 
-async def _run_streaming_single(
+async def _collect_streaming_audio(
     omni: AsyncOmni,
     args: Any,
     spec: PromptSpec,
-    output_dir: Path,
     request_id: str,
     *,
-    run_index: int,
-    num_runs: int,
+    phase_label: str,
     prompt_index: int,
     prompt_count: int,
-) -> Path:
+    print_prompt: bool = False,
+) -> tuple[torch.Tensor, int, float]:
     prompt = _build_prompt_for_spec(args, spec, global_request_id=request_id)
     delta_chunks: list[torch.Tensor] = []
     sample_rate = 24000
@@ -369,7 +380,7 @@ async def _run_streaming_single(
     prev_total_samples = 0
     t_start = time.perf_counter()
 
-    if run_index == 0 and prompt_index == 0:
+    if print_prompt:
         print(f"---prompt---:{prompt}")
 
     async for stage_output in omni.generate(prompt, request_id=request_id):
@@ -394,9 +405,8 @@ async def _run_streaming_single(
                 prev_total_samples += int(delta.numel())
             delta_chunks.append(delta)
             logger.info(
-                "run=%d/%d prompt=%d/%d chunk=%d delta_samples=%d buf_len=%d finished=%s",
-                run_index + 1,
-                num_runs,
+                "%s prompt=%d/%d chunk=%d delta_samples=%d buf_len=%d finished=%s",
+                phase_label,
                 prompt_index + 1,
                 prompt_count,
                 chunk_i,
@@ -413,14 +423,72 @@ async def _run_streaming_single(
         raise RuntimeError("No audio chunks received; check stage config and logs.")
 
     audio_cat = torch.cat([c.reshape(-1) for c in delta_chunks], dim=0)
+    elapsed = time.perf_counter() - t_start
+    return audio_cat, sample_rate, elapsed
+
+
+async def _run_streaming_single(
+    omni: AsyncOmni,
+    args: Any,
+    spec: PromptSpec,
+    output_dir: Path,
+    request_id: str,
+    *,
+    run_index: int,
+    num_runs: int,
+    prompt_index: int,
+    prompt_count: int,
+) -> Path:
+    audio_cat, sample_rate, elapsed = await _collect_streaming_audio(
+        omni,
+        args,
+        spec,
+        request_id,
+        phase_label=f"run={run_index + 1}/{num_runs}",
+        prompt_index=prompt_index,
+        prompt_count=prompt_count,
+        print_prompt=(run_index == 0 and prompt_index == 0),
+    )
     output_path = output_dir / f"output_run{run_index + 1}_{spec.label}.wav"
     sf.write(output_path, audio_cat.numpy(), sample_rate, format="WAV")
-    elapsed = time.perf_counter() - t_start
     print(
         f"Saved (streaming) run {run_index + 1}/{num_runs}, "
         f"prompt {prompt_index + 1}/{prompt_count}: {output_path} ({elapsed:.2f}s)"
     )
     return output_path
+
+
+async def _run_streaming_warmup(args, omni: AsyncOmni) -> None:
+    if args.warmup_runs == 0:
+        return
+
+    warmup_specs = _get_warmup_specs(args.prompt_specs, args.batch_size)
+    print(
+        f"Warmup: {args.warmup_runs} run(s) using the first batch "
+        f"({len(warmup_specs)} prompt(s)); outputs will be discarded."
+    )
+    for warmup_index in range(args.warmup_runs):
+        t_warmup = time.perf_counter()
+        tasks = []
+        for prompt_index, spec in enumerate(warmup_specs):
+            request_id = f"warmup_stream_{warmup_index + 1}_{spec.label}_{uuid.uuid4().hex[:8]}"
+            tasks.append(
+                _collect_streaming_audio(
+                    omni,
+                    args,
+                    spec,
+                    request_id,
+                    phase_label=f"warmup={warmup_index + 1}/{args.warmup_runs}",
+                    prompt_index=prompt_index,
+                    prompt_count=len(warmup_specs),
+                )
+            )
+        results = await asyncio.gather(*tasks)
+        total_samples = sum(int(audio.numel()) for audio, _, _ in results)
+        print(
+            f"Warmup (streaming) {warmup_index + 1}/{args.warmup_runs} finished: "
+            f"{len(results)} prompt(s), {total_samples} sample(s) ({time.perf_counter() - t_warmup:.2f}s)"
+        )
 
 
 async def _run_streaming(args) -> list[Path]:
@@ -434,6 +502,7 @@ async def _run_streaming(args) -> list[Path]:
         stage_init_timeout=args.stage_init_timeout,
     )
 
+    await _run_streaming_warmup(args, omni)
     t_total = time.perf_counter()
     paths: list[Path] = []
     prompt_specs: list[PromptSpec] = args.prompt_specs
@@ -475,6 +544,62 @@ def _run_sync(args) -> list[Path]:
         stage_init_timeout=args.stage_init_timeout,
     )
 
+    def _run_sync_batch(
+        batch_specs: list[PromptSpec],
+        *,
+        request_prefix: str,
+        save_outputs: bool,
+        batch_index: int | None = None,
+        run_index: int | None = None,
+    ) -> tuple[list[Path], int]:
+        prompts = []
+        for prompt_offset, spec in enumerate(batch_specs, start=1):
+            global_request_id = f"{request_prefix}_{spec.label}_{prompt_offset:03d}"
+            prompts.append(_build_prompt_for_spec(args, spec, global_request_id=global_request_id))
+        if save_outputs and run_index == 0 and batch_index == 1 and prompts:
+            print(f"---prompt---:{prompts[0]}")
+
+        batch_paths: list[Path] = []
+        output_count = 0
+        for stage_outputs in omni.generate(prompts):
+            request_output = stage_outputs.request_output
+            if request_output is None:
+                continue
+            item_label = _resolve_output_label(request_output.request_id, batch_specs)
+            for j, mm in enumerate(_iter_request_multimodal_outputs(request_output)):
+                output_count += 1
+                if not save_outputs:
+                    continue
+                assert batch_index is not None
+                save_stem = (
+                    f"run{run_index + 1}_batch{batch_index}_{item_label}"
+                    if j == 0
+                    else f"run{run_index + 1}_batch{batch_index}_{item_label}_{j}"
+                )
+                batch_paths.append(_save_wav(mm, output_dir, save_stem))
+
+        if output_count == 0:
+            raise RuntimeError("No output from Omni.generate")
+        return batch_paths, output_count
+
+    if args.warmup_runs:
+        warmup_specs = _get_warmup_specs(args.prompt_specs, args.batch_size)
+        print(
+            f"Warmup: {args.warmup_runs} run(s) using the first batch "
+            f"({len(warmup_specs)} prompt(s)); outputs will be discarded."
+        )
+        for warmup_index in range(args.warmup_runs):
+            t_warmup = time.perf_counter()
+            _, output_count = _run_sync_batch(
+                warmup_specs,
+                request_prefix=f"warmup_sync{warmup_index + 1}",
+                save_outputs=False,
+            )
+            print(
+                f"Warmup (sync) {warmup_index + 1}/{args.warmup_runs} finished: "
+                f"{output_count} output(s) ({time.perf_counter() - t_warmup:.2f}s)"
+            )
+
     t_total = time.perf_counter()
     saved_paths: list[Path] = []
     prompt_specs: list[PromptSpec] = args.prompt_specs
@@ -482,29 +607,13 @@ def _run_sync(args) -> list[Path]:
         t_run = time.perf_counter()
         run_paths: list[Path] = []
         for batch_index, (batch_start, batch_specs) in enumerate(_iter_batches(prompt_specs, args.batch_size), start=1):
-            prompts = []
-            for batch_offset, spec in enumerate(batch_specs):
-                prompt_index = batch_start + batch_offset
-                global_request_id = f"sync_run{run + 1}_{spec.label}_{prompt_index + 1:03d}"
-                prompts.append(_build_prompt_for_spec(args, spec, global_request_id=global_request_id))
-            if run == 0 and batch_index == 1 and prompts:
-                print(f"---prompt---:{prompts[0]}")
-
-            batch_paths: list[Path] = []
-            for stage_outputs in omni.generate(prompts):
-                request_output = stage_outputs.request_output
-                if request_output is None:
-                    continue
-                item_label = _resolve_output_label(request_output.request_id, batch_specs)
-                for j, mm in enumerate(_iter_request_multimodal_outputs(request_output)):
-                    save_stem = (
-                        f"run{run + 1}_batch{batch_index}_{item_label}"
-                        if j == 0
-                        else f"run{run + 1}_batch{batch_index}_{item_label}_{j}"
-                    )
-                    batch_paths.append(_save_wav(mm, output_dir, save_stem))
-            if not batch_paths:
-                raise RuntimeError("No output from Omni.generate")
+            batch_paths, _ = _run_sync_batch(
+                batch_specs,
+                request_prefix=f"sync_run{run + 1}_batch{batch_index}",
+                save_outputs=True,
+                batch_index=batch_index,
+                run_index=run,
+            )
             run_paths.extend(batch_paths)
             print(f"Saved (sync) run {run + 1}/{args.num_runs}, batch {batch_index}: {len(batch_paths)} file(s)")
 
@@ -530,6 +639,7 @@ def main(args) -> None:
     print(f"Route: {'streaming' if is_streaming else 'sync'} (from stage-configs-path)")
     print(f"Prompt count: {len(args.prompt_specs)}")
     print(f"Batch size: {args.batch_size}")
+    print(f"Warmup runs: {args.warmup_runs}")
     print(f"Voice cloning prompts: {voice_clone_count}/{len(args.prompt_specs)}")
     if voice_clone_count:
         print("Voice cloning note: --ref-text/ref_text must match the spoken content of the reference audio.")

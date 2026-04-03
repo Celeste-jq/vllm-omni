@@ -50,6 +50,18 @@ python examples/offline_inference/voxcpm/end2end.py \
   --text "This is a split-stage VoxCPM synthesis example running on vLLM Omni."
 ```
 
+Optional warmup before measured runs:
+
+```bash
+python examples/offline_inference/voxcpm/end2end.py \
+  --model "$VOXCPM_MODEL" \
+  --text "This is a split-stage VoxCPM synthesis example running on vLLM Omni." \
+  --warmup-runs 1 \
+  --num-runs 3
+```
+
+`--warmup-runs` only warms up the first batch of prompts. Warmup outputs are discarded and do not count toward `--num-runs`.
+
 Voice cloning:
 
 ```bash
@@ -135,6 +147,7 @@ For voice cloning rows, provide `ref_audio` and `ref_text` together:
 - `--txt-prompts`: load one synthesis text per line from a `.txt` file
 - `--jsonl-prompts`: load prompts from `.jsonl`, including per-item voice cloning metadata
 - `--batch-size`: requests submitted together per sync batch, or concurrent requests per streaming wave
+- `--warmup-runs`: optional warmup passes before measured runs; only the first batch is used and outputs are discarded
 - `--cfg-value`: guidance value passed to VoxCPM
 - `--inference-timesteps`: number of diffusion timesteps
 - `--min-len`: minimum token length
