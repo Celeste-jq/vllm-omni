@@ -185,21 +185,20 @@ class OmniChunkTransferAdapter(OmniTransferAdapterBase):
 
                 new_ids = payload_data.get("code_predictor_codes", [])
                 request.prompt_token_ids = new_ids
-                # Pass additional fields (like left_context_size) to the request
-                # Only pass chunk context metadata in additional_information
-                request.additional_information = {}
-                if "left_context_size" in payload_data:
-                    request.additional_information["left_context_size"] = payload_data["left_context_size"]
-                if "latent_audio_feat" in payload_data:
-                    request.additional_information["latent_audio_feat"] = payload_data["latent_audio_feat"]
-                if "sr" in payload_data:
-                    request.additional_information["sample_rate"] = payload_data["sr"]
+                # Preserve previously attached request metadata (e.g. prompt
+                # conditioning tensors) and update only per-chunk fields.
+                prev_info = getattr(request, "additional_information", None)
+                info = dict(prev_info) if isinstance(prev_info, dict) else {}
+                for key, value in payload_data.items():
+                    if key in {"code_predictor_codes", "finished"}:
+                        continue
+                    info[key] = value
+                request.additional_information = info
                 request.num_computed_tokens = 0
 
                 # Empty chunk with more data expected: keep polling.
                 if not new_ids and not _fin_ok:
-                    if "latent_audio_feat" not in payload_data:
-                        return True
+                    return True
 
             # Mark as finished for consumption
             self._finished_load_reqs.add(req_id)
