@@ -16,12 +16,15 @@ Scenarios:
 from __future__ import annotations
 
 import argparse
+import ast
+import json
 import shlex
 import subprocess
 import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 END2END_SCRIPT = Path(__file__).with_name("end2end.py")
@@ -63,6 +66,8 @@ class CaseResult:
     returncode: int
     elapsed_s: float
     output_dir: Path
+    log_path: Path
+    request_summaries: list[dict[str, Any]]
 
     @property
     def ok(self) -> bool:
@@ -158,11 +163,6 @@ def parse_args() -> argparse.Namespace:
         default=600,
         help="Stage initialization timeout forwarded to end2end.py.",
     )
-    parser.add_argument(
-        "--log-stats",
-        action="store_true",
-        help="Forward --log-stats to end2end.py.",
-    )
     return parser.parse_args()
 
 
@@ -194,6 +194,7 @@ def _base_command(args: argparse.Namespace, mode: ModeSpec, output_dir: Path) ->
         str(args.num_runs),
         "--stage-init-timeout",
         str(args.stage_init_timeout),
+        "--log-stats",
     ]
     if args.cfg_value is not None:
         cmd.extend(["--cfg-value", str(args.cfg_value)])
@@ -205,9 +206,120 @@ def _base_command(args: argparse.Namespace, mode: ModeSpec, output_dir: Path) ->
         cmd.extend(["--max-new-tokens", str(args.max_new_tokens)])
     if args.streaming_prefix_len is not None:
         cmd.extend(["--streaming-prefix-len", str(args.streaming_prefix_len)])
-    if args.log_stats:
-        cmd.append("--log-stats")
     return cmd
+
+
+def _extract_summary_blocks(log_text: str) -> list[dict[str, Any]]:
+    marker = "[Summary]"
+    results: list[dict[str, Any]] = []
+    cursor = 0
+    while True:
+        marker_idx = log_text.find(marker, cursor)
+        if marker_idx < 0:
+            break
+        brace_idx = log_text.find("{", marker_idx)
+        if brace_idx < 0:
+            break
+
+        depth = 0
+        in_single = False
+        in_double = False
+        escaped = False
+        end_idx: int | None = None
+        for pos in range(brace_idx, len(log_text)):
+            ch = log_text[pos]
+            if escaped:
+                escaped = False
+                continue
+            if ch == "\\":
+                escaped = True
+                continue
+            if in_single:
+                if ch == "'":
+                    in_single = False
+                continue
+            if in_double:
+                if ch == '"':
+                    in_double = False
+                continue
+            if ch == "'":
+                in_single = True
+                continue
+            if ch == '"':
+                in_double = True
+                continue
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    end_idx = pos + 1
+                    break
+
+        if end_idx is None:
+            break
+
+        block = log_text[brace_idx:end_idx]
+        try:
+            parsed = ast.literal_eval(block)
+        except Exception:
+            cursor = end_idx
+            continue
+        if isinstance(parsed, dict):
+            results.append(parsed)
+        cursor = end_idx
+    return results
+
+
+def _normalize_request_summaries(summary_blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    normalized: list[dict[str, Any]] = []
+    for summary in summary_blocks:
+        overall = summary.get("overall_summary", {})
+        request_id = None
+        stage_table = summary.get("stage_table", [])
+        e2e_table = summary.get("e2e_table", [])
+        if stage_table and isinstance(stage_table[0], dict):
+            request_id = stage_table[0].get("request_id")
+        if request_id is None and e2e_table and isinstance(e2e_table[0], dict):
+            request_id = e2e_table[0].get("request_id")
+        if request_id is None:
+            request_id = f"request_{len(normalized) + 1:03d}"
+
+        stage_wall_times: dict[str, float] = {}
+        for key, value in overall.items():
+            if key.startswith("e2e_stage_") and key.endswith("_wall_time_ms"):
+                stage_name = key[len("e2e_") : -len("_wall_time_ms")]
+                stage_wall_times[stage_name] = float(value)
+
+        e2e_stats = e2e_table[0] if e2e_table and isinstance(e2e_table[0], dict) else {}
+        normalized.append(
+            {
+                "request_id": request_id,
+                "stage_wall_time_ms": stage_wall_times,
+                "e2e_total_ms": float(e2e_stats.get("e2e_total_ms", 0.0)),
+                "e2e_total_tokens": int(e2e_stats.get("e2e_total_tokens", 0)),
+                "transfers_total_time_ms": float(e2e_stats.get("transfers_total_time_ms", 0.0)),
+                "transfers_total_kbytes": float(e2e_stats.get("transfers_total_kbytes", 0.0)),
+            }
+        )
+    return normalized
+
+
+def _print_request_summaries(request_summaries: list[dict[str, Any]]) -> None:
+    if not request_summaries:
+        print("未解析到 stage 耗时摘要。")
+        return
+    print("每个 request 的 stage 耗时:")
+    for item in request_summaries:
+        stage_parts = [
+            f"{stage_name}={stage_ms:.2f}ms"
+            for stage_name, stage_ms in sorted(item["stage_wall_time_ms"].items())
+        ]
+        stage_text = ", ".join(stage_parts) if stage_parts else "无 stage 数据"
+        print(
+            f"- {item['request_id']}: {stage_text}, "
+            f"e2e={item['e2e_total_ms']:.2f}ms, tokens={item['e2e_total_tokens']}"
+        )
 
 
 def _build_case_command(
@@ -251,6 +363,8 @@ def _run_case(
     output_root: Path,
 ) -> CaseResult:
     case_output_dir = output_root / mode.name / case.name
+    case_output_dir.mkdir(parents=True, exist_ok=True)
+    case_log_path = case_output_dir / "run.log"
     cmd = _build_case_command(
         args,
         mode,
@@ -267,17 +381,42 @@ def _run_case(
     print(shlex.join(cmd))
 
     start = time.perf_counter()
-    completed = subprocess.run(cmd, check=False)
+    captured_lines: list[str] = []
+    with case_log_path.open("w", encoding="utf-8") as log_fp:
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+        assert process.stdout is not None
+        for line in process.stdout:
+            print(line, end="")
+            log_fp.write(line)
+            captured_lines.append(line)
+        process.wait()
     elapsed_s = time.perf_counter() - start
-    status = "PASS" if completed.returncode == 0 else "FAIL"
+    completed_returncode = int(process.returncode or 0)
+    summary_blocks = _extract_summary_blocks("".join(captured_lines))
+    request_summaries = _normalize_request_summaries(summary_blocks)
+    _print_request_summaries(request_summaries)
+    summary_json_path = case_output_dir / "summary.json"
+    summary_json_path.write_text(
+        json.dumps(request_summaries, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    status = "PASS" if completed_returncode == 0 else "FAIL"
     print(f"[{mode.name}] {case.name} -> {status} ({elapsed_s:.2f}s)")
 
     return CaseResult(
         mode=mode.name,
         case=case.name,
-        returncode=completed.returncode,
+        returncode=completed_returncode,
         elapsed_s=elapsed_s,
         output_dir=case_output_dir,
+        log_path=case_log_path,
+        request_summaries=request_summaries,
     )
 
 
@@ -317,12 +456,43 @@ def main() -> int:
     for result in results:
         status = "PASS" if result.ok else f"FAIL({result.returncode})"
         print(f"- [{result.mode}] {result.case}: {status} ({result.elapsed_s:.2f}s)")
+        for item in result.request_summaries:
+            stage_parts = [
+                f"{stage_name}={stage_ms:.2f}ms"
+                for stage_name, stage_ms in sorted(item["stage_wall_time_ms"].items())
+            ]
+            stage_text = ", ".join(stage_parts) if stage_parts else "无 stage 数据"
+            print(
+                f"  request={item['request_id']}, {stage_text}, "
+                f"e2e={item['e2e_total_ms']:.2f}ms"
+            )
 
     print(f"通过: {passed}/{len(results)}")
+    results_json_path = output_root / "results.json"
+    results_json_path.write_text(
+        json.dumps(
+            [
+                {
+                    "mode": result.mode,
+                    "case": result.case,
+                    "returncode": result.returncode,
+                    "elapsed_s": result.elapsed_s,
+                    "output_dir": str(result.output_dir),
+                    "log_path": str(result.log_path),
+                    "request_summaries": result.request_summaries,
+                }
+                for result in results
+            ],
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    print(f"结果汇总已写入: {results_json_path}")
     if failed:
         print("失败用例:")
         for result in failed:
-            print(f"- [{result.mode}] {result.case}: 输出目录 {result.output_dir}")
+            print(f"- [{result.mode}] {result.case}: 输出目录 {result.output_dir}, 日志 {result.log_path}")
         return 1
     return 0
 
