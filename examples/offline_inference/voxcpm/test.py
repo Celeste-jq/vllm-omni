@@ -163,6 +163,30 @@ def parse_args() -> argparse.Namespace:
         default=600,
         help="Stage initialization timeout forwarded to end2end.py.",
     )
+    parser.add_argument(
+        "--enable-profiler",
+        action="store_true",
+        help="Enable profiler for each case. end2end.py will generate a temporary profiled stage config automatically.",
+    )
+    parser.add_argument(
+        "--profiler-dir",
+        type=str,
+        default=None,
+        help="Optional root directory for profiler traces. Defaults to <case-output-dir>/profiler.",
+    )
+    parser.add_argument(
+        "--profiler-stages",
+        type=int,
+        nargs="*",
+        default=None,
+        help="Optional stage ids to profile. Defaults to all configured stages.",
+    )
+    parser.add_argument(
+        "--profiler-wait-seconds",
+        type=float,
+        default=30.0,
+        help="Seconds to wait after stop_profile in each case.",
+    )
     return parser.parse_args()
 
 
@@ -206,6 +230,14 @@ def _base_command(args: argparse.Namespace, mode: ModeSpec, output_dir: Path) ->
         cmd.extend(["--max-new-tokens", str(args.max_new_tokens)])
     if args.streaming_prefix_len is not None:
         cmd.extend(["--streaming-prefix-len", str(args.streaming_prefix_len)])
+    if args.enable_profiler:
+        profiler_dir = Path(args.profiler_dir) if args.profiler_dir is not None else (output_dir / "profiler")
+        cmd.append("--enable-profiler")
+        cmd.extend(["--profiler-dir", str(profiler_dir)])
+        cmd.extend(["--profiler-wait-seconds", str(args.profiler_wait_seconds)])
+        if args.profiler_stages is not None:
+            cmd.append("--profiler-stages")
+            cmd.extend(str(stage_id) for stage_id in args.profiler_stages)
     return cmd
 
 

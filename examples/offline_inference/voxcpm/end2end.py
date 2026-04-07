@@ -14,6 +14,7 @@ import asyncio
 import json
 import logging
 import os
+import tempfile
 import time
 import uuid
 from dataclasses import dataclass
@@ -205,6 +206,47 @@ def _get_warmup_specs(prompt_specs: list[PromptSpec]) -> list[PromptSpec]:
     return prompt_specs[:1]
 
 
+def _build_profiled_stage_config(
+    stage_configs_path: str,
+    profiler_dir: str,
+) -> str:
+    stage_config_path = Path(stage_configs_path)
+    yaml_text = stage_config_path.read_text(encoding="utf-8")
+    injected_lines: list[str] = []
+    injected_count = 0
+
+    for line in yaml_text.splitlines():
+        injected_lines.append(line)
+        if line.strip() != "engine_args:":
+            continue
+        indent = line[: len(line) - len(line.lstrip())]
+        child_indent = indent + "  "
+        grandchild_indent = child_indent + "  "
+        injected_lines.extend(
+            [
+                f"{child_indent}profiler_config:",
+                f'{grandchild_indent}profiler: "torch"',
+                f'{grandchild_indent}torch_profiler_dir: "{profiler_dir}"',
+                f"{grandchild_indent}torch_profiler_with_stack: true",
+            ]
+        )
+        injected_count += 1
+
+    if injected_count == 0:
+        raise ValueError(f"No engine_args block found in stage config: {stage_configs_path}")
+
+    tmp = tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        delete=False,
+        suffix=".yaml",
+        prefix=f"{stage_config_path.stem}_profile_",
+    )
+    tmp.write("\n".join(injected_lines) + "\n")
+    tmp.close()
+    return tmp.name
+
+
 def parse_args():
     parser = FlexibleArgumentParser(
         description="Offline split-stage VoxCPM inference with vLLM Omni (auto sync/streaming by stage config)"
@@ -310,6 +352,30 @@ def parse_args():
         default=0,
         help="Optional number of warmup passes before measured runs. Warmup uses only the first prompt and does not save outputs.",
     )
+    parser.add_argument(
+        "--enable-profiler",
+        action="store_true",
+        help="Enable torch profiler for the configured stages. A temporary profiled stage config is generated automatically.",
+    )
+    parser.add_argument(
+        "--profiler-dir",
+        type=str,
+        default=None,
+        help="Directory for profiler traces. Defaults to <output-dir>/profiler when profiling is enabled.",
+    )
+    parser.add_argument(
+        "--profiler-stages",
+        type=int,
+        nargs="*",
+        default=None,
+        help="Optional stage ids to profile. Defaults to all stages that have profiler_config.",
+    )
+    parser.add_argument(
+        "--profiler-wait-seconds",
+        type=float,
+        default=30.0,
+        help="Seconds to wait after stop_profile for trace files to flush.",
+    )
     args = parser.parse_args()
 
     if not args.model:
@@ -324,6 +390,8 @@ def parse_args():
         parser.error("--warmup-runs must be >= 0")
     if args.output_dir is None:
         args.output_dir = "output_audio_streaming" if _is_streaming_stage_config(args.stage_configs_path) else "output_audio"
+    if args.enable_profiler and args.profiler_dir is None:
+        args.profiler_dir = str(Path(args.output_dir) / "profiler")
     try:
         args.prompt_specs = _load_prompt_specs(args)
     except ValueError as exc:
@@ -492,26 +560,43 @@ async def _run_streaming(args) -> list[Path]:
     )
 
     await _run_streaming_warmup(args, omni)
+    profiler_started = False
+    if args.enable_profiler:
+        profile_prefix = f"voxcpm_streaming_{int(time.time())}"
+        stages_text = args.profiler_stages if args.profiler_stages is not None else "all-configured"
+        print(f"Starting profiler (streaming): stages={stages_text}, dir={args.profiler_dir}")
+        await omni.start_profile(profile_prefix=profile_prefix, stages=args.profiler_stages)
+        profiler_started = True
     t_total = time.perf_counter()
+    total_elapsed = 0.0
     paths: list[Path] = []
     prompt_specs: list[PromptSpec] = args.prompt_specs
-    for run in range(args.num_runs):
-        for prompt_index, spec in enumerate(prompt_specs):
-            request_id = f"stream_{run + 1}_{spec.label}_{uuid.uuid4().hex[:8]}"
-            paths.append(
-                await _run_streaming_single(
-                    omni,
-                    args,
-                    spec,
-                    output_dir,
-                    request_id,
-                    run_index=run,
-                    num_runs=args.num_runs,
-                    prompt_index=prompt_index,
-                    prompt_count=len(prompt_specs),
+    try:
+        for run in range(args.num_runs):
+            for prompt_index, spec in enumerate(prompt_specs):
+                request_id = f"stream_{run + 1}_{spec.label}_{uuid.uuid4().hex[:8]}"
+                paths.append(
+                    await _run_streaming_single(
+                        omni,
+                        args,
+                        spec,
+                        output_dir,
+                        request_id,
+                        run_index=run,
+                        num_runs=args.num_runs,
+                        prompt_index=prompt_index,
+                        prompt_count=len(prompt_specs),
+                    )
                 )
-            )
-    total_elapsed = time.perf_counter() - t_total
+        total_elapsed = time.perf_counter() - t_total
+    finally:
+        if profiler_started:
+            print("Stopping profiler (streaming)...")
+            await omni.stop_profile(stages=args.profiler_stages)
+            if args.profiler_wait_seconds > 0:
+                print(f"Waiting {args.profiler_wait_seconds:.1f}s for profiler traces to flush...")
+                await asyncio.sleep(args.profiler_wait_seconds)
+
     print(
         f"All streaming runs finished: {args.num_runs} run(s), "
         f"{len(prompt_specs)} prompt(s), {len(paths)} file(s) in {total_elapsed:.2f}s total"
@@ -589,32 +674,52 @@ def _run_sync(args) -> list[Path]:
                 f"{output_count} output(s) ({time.perf_counter() - t_warmup:.2f}s{ttfa_text})"
             )
 
+    profiler_started = False
+    if args.enable_profiler:
+        profile_prefix = f"voxcpm_sync_{int(time.time())}"
+        stages_text = args.profiler_stages if args.profiler_stages is not None else "all-configured"
+        print(f"Starting profiler (sync): stages={stages_text}, dir={args.profiler_dir}")
+        omni.start_profile(profile_prefix=profile_prefix, stages=args.profiler_stages)
+        profiler_started = True
+
     t_total = time.perf_counter()
+    total_elapsed = 0.0
     saved_paths: list[Path] = []
     prompt_specs: list[PromptSpec] = args.prompt_specs
-    for run in range(args.num_runs):
-        t_run = time.perf_counter()
-        run_paths: list[Path] = []
-        for prompt_index, spec in enumerate(prompt_specs):
-            prompt_paths, _, first_audio_elapsed = _run_sync_single(
-                spec,
-                request_prefix=f"sync_run{run + 1}_{prompt_index + 1:03d}",
-                save_outputs=True,
-                run_index=run,
-            )
-            run_paths.extend(prompt_paths)
-            ttfa_text = f", ttfa={first_audio_elapsed:.2f}s" if first_audio_elapsed is not None else ""
+    try:
+        for run in range(args.num_runs):
+            t_run = time.perf_counter()
+            run_paths: list[Path] = []
+            for prompt_index, spec in enumerate(prompt_specs):
+                prompt_paths, _, first_audio_elapsed = _run_sync_single(
+                    spec,
+                    request_prefix=f"sync_run{run + 1}_{prompt_index + 1:03d}",
+                    save_outputs=True,
+                    run_index=run,
+                )
+                run_paths.extend(prompt_paths)
+                ttfa_text = f", ttfa={first_audio_elapsed:.2f}s" if first_audio_elapsed is not None else ""
+                print(
+                    f"Saved (sync) run {run + 1}/{args.num_runs}, "
+                    f"prompt {prompt_index + 1}/{len(prompt_specs)}: {len(prompt_paths)} file(s){ttfa_text}"
+                )
+
+            saved_paths.extend(run_paths)
             print(
-                f"Saved (sync) run {run + 1}/{args.num_runs}, "
-                f"prompt {prompt_index + 1}/{len(prompt_specs)}: {len(prompt_paths)} file(s){ttfa_text}"
+                f"Run {run + 1}/{args.num_runs} finished: {len(run_paths)} file(s) ({time.perf_counter() - t_run:.2f}s)"
             )
+            for path in run_paths:
+                print(f"  {path}")
 
-        saved_paths.extend(run_paths)
-        print(f"Run {run + 1}/{args.num_runs} finished: {len(run_paths)} file(s) ({time.perf_counter() - t_run:.2f}s)")
-        for path in run_paths:
-            print(f"  {path}")
+        total_elapsed = time.perf_counter() - t_total
+    finally:
+        if profiler_started:
+            print("Stopping profiler (sync)...")
+            omni.stop_profile(stages=args.profiler_stages)
+            if args.profiler_wait_seconds > 0:
+                print(f"Waiting {args.profiler_wait_seconds:.1f}s for profiler traces to flush...")
+                time.sleep(args.profiler_wait_seconds)
 
-    total_elapsed = time.perf_counter() - t_total
     print(
         f"All sync runs finished: {args.num_runs} run(s), "
         f"{len(prompt_specs)} prompt(s), {len(saved_paths)} file(s) in {total_elapsed:.2f}s total"
@@ -624,22 +729,39 @@ def _run_sync(args) -> list[Path]:
 
 def main(args) -> None:
     logging.basicConfig(level=logging.INFO)
+    profiled_stage_config_path: str | None = None
+    original_stage_config_path = args.stage_configs_path
+    if args.enable_profiler:
+        Path(args.profiler_dir).mkdir(parents=True, exist_ok=True)
+        profiled_stage_config_path = _build_profiled_stage_config(
+            args.stage_configs_path,
+            str(Path(args.profiler_dir).resolve()),
+        )
+        args.stage_configs_path = profiled_stage_config_path
+
     is_streaming = _is_streaming_stage_config(args.stage_configs_path)
     voice_clone_count = _count_voice_clone_prompts(args.prompt_specs)
     print(f"Model: {args.model}")
-    print(f"Stage config: {args.stage_configs_path}")
+    print(f"Stage config: {original_stage_config_path}")
     print(f"Route: {'streaming' if is_streaming else 'sync'} (from stage-configs-path)")
     print(f"Prompt count: {len(args.prompt_specs)}")
     print("Batch mode: sequential (aligned with native VoxCPM)")
     print(f"Warmup runs: {args.warmup_runs}")
     print(f"Voice cloning prompts: {voice_clone_count}/{len(args.prompt_specs)}")
+    if args.enable_profiler:
+        print(f"Profiler: enabled (dir={args.profiler_dir}, stages={args.profiler_stages or 'all-configured'})")
+        print(f"Profiled stage config: {args.stage_configs_path}")
     if voice_clone_count:
         print("Voice cloning note: --ref-text/ref_text must match the spoken content of the reference audio.")
     print(f"Num runs: {args.num_runs}")
-    if is_streaming:
-        asyncio.run(_run_streaming(args))
-    else:
-        _run_sync(args)
+    try:
+        if is_streaming:
+            asyncio.run(_run_streaming(args))
+        else:
+            _run_sync(args)
+    finally:
+        if profiled_stage_config_path is not None and os.path.exists(profiled_stage_config_path):
+            os.unlink(profiled_stage_config_path)
 
 
 if __name__ == "__main__":
