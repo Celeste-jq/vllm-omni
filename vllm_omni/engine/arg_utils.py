@@ -11,6 +11,11 @@ from vllm.logger import init_logger
 
 from vllm_omni.config import OmniModelConfig
 from vllm_omni.engine.output_modality import OutputModality
+from vllm_omni.model_executor.models.voxcpm.configuration_voxcpm import VoxCPMConfig
+from vllm_omni.model_executor.models.voxcpm.native_config import (
+    detect_native_voxcpm_model_type,
+    ensure_hf_compatible_voxcpm_config,
+)
 from vllm_omni.plugins import load_omni_general_plugins
 
 logger = init_logger(__name__)
@@ -57,6 +62,7 @@ def _register_omni_hf_configs() -> None:
         ("cosyvoice3", CosyVoice3Config),
         ("omnivoice", OmniVoiceConfig),
         ("voxtral_tts", VoxtralTTSConfig),
+        ("voxcpm", VoxCPMConfig),
     ]:
         try:
             AutoConfig.register(model_type, config_cls)
@@ -65,6 +71,16 @@ def _register_omni_hf_configs() -> None:
             pass
         if _CONFIG_REGISTRY is not None and model_type not in _CONFIG_REGISTRY:
             _CONFIG_REGISTRY[model_type] = config_cls
+
+
+def _maybe_prepare_model_hf_config_path(model: str, hf_config_path: str | None) -> str | None:
+    if hf_config_path:
+        return hf_config_path
+
+    if detect_native_voxcpm_model_type(model) == "voxcpm":
+        return ensure_hf_compatible_voxcpm_config(model)
+
+    return hf_config_path
 
 
 def register_omni_models_to_vllm():
@@ -166,20 +182,15 @@ class OmniEngineArgs(EngineArgs):
         Returns:
             OmniModelConfig instance with all configuration fields set
         """
-        # register omni models to avoid model not found error
         self._ensure_omni_models_registered()
+        self.hf_config_path = _maybe_prepare_model_hf_config_path(self.model, self.hf_config_path)
 
-        # Build stage_connector_config from stage_connector_spec
         stage_connector_config = {
             "name": self.stage_connector_spec.get("name", "SharedMemoryConnector"),
             "extra": self.stage_connector_spec.get("extra", {}).copy(),
         }
         stage_connector_config["extra"]["stage_id"] = self.stage_id
 
-        # If model_arch is specified, inject it into hf_overrides so vLLM can
-        # resolve the architecture even when config.json lacks 'architectures'.
-        # Also inject model_type so AutoConfig can resolve the correct config
-        # class for models with empty or missing config.json (e.g. CosyVoice3).
         if self.model_arch:
             if self.hf_overrides is None:
                 self.hf_overrides = {}

@@ -16,6 +16,30 @@ from .base import OmniTransferAdapterBase
 logger = get_connector_logger(__name__)
 
 
+def _connector_finished_truthy(val: Any) -> bool:
+    """Interpret connector ``finished`` without ``if tensor`` (PyTorch disallows tensor truthiness)."""
+    if val is None:
+        return False
+    if isinstance(val, torch.Tensor):
+        if val.numel() == 0:
+            return False
+        return bool(val.detach().cpu().reshape(-1)[0].item())
+    try:
+        import numpy as np
+
+        if isinstance(val, np.ndarray):
+            if val.size == 0:
+                return False
+            return bool(np.asarray(val.reshape(-1)[0]).item())
+        if isinstance(val, np.generic):
+            return bool(np.asarray(val).item())
+    except ImportError:
+        pass
+    if isinstance(val, (list, tuple)) and len(val) == 1:
+        return _connector_finished_truthy(val[0])
+    return bool(val)
+
+
 class OmniChunkTransferAdapter(OmniTransferAdapterBase):
     """Chunk-level transfer adapter for Omni connector pipelines.
 
@@ -152,10 +176,11 @@ class OmniChunkTransferAdapter(OmniTransferAdapterBase):
             if self.model_mode == "ar":
                 self._update_request_payload(external_req_id, payload_data)
                 request.additional_information = payload_data
-                if payload_data.get("finished"):
+                if _connector_finished_truthy(payload_data.get("finished")):
                     self.finished_requests.add(req_id)
             else:
-                if payload_data.get("finished"):
+                _fin_ok = _connector_finished_truthy(payload_data.get("finished"))
+                if _fin_ok:
                     self.finished_requests.add(req_id)
 
                 new_ids = payload_data.get("code_predictor_codes", [])
@@ -172,7 +197,7 @@ class OmniChunkTransferAdapter(OmniTransferAdapterBase):
                 request.num_computed_tokens = 0
 
                 # Empty chunk with more data expected: keep polling.
-                if not new_ids and not payload_data.get("finished"):
+                if not new_ids and not _fin_ok:
                     return True
 
             # Mark as finished for consumption
@@ -232,6 +257,8 @@ class OmniChunkTransferAdapter(OmniTransferAdapterBase):
                 logger.error(f"Failed to use custom_process_input_func for payload extraction: {e}")
 
         if not payload_data:
+            if is_finished:
+                self.cleanup(request.request_id, getattr(request, "external_req_id", None))
             return
 
         success, size, metadata = self.connector.put(
@@ -244,23 +271,9 @@ class OmniChunkTransferAdapter(OmniTransferAdapterBase):
         if success:
             self.put_req_chunk[external_req_id] += 1
             logger.debug(f"[Stage-{stage_id}] Sent {connector_put_key}")
-            finished_flag = payload_data.get("finished")
-            is_payload_finished = False
-            if isinstance(finished_flag, torch.Tensor):
-                is_payload_finished = finished_flag.numel() == 1 and bool(finished_flag.item())
-            elif finished_flag is not None:
-                is_payload_finished = bool(finished_flag)
-
-            # Reclaim per-request async state only after the terminal payload
-            # has been sent successfully. This avoids cleanup->save races.
-            if is_payload_finished:
-                self.cleanup(request.request_id, external_req_id)
 
         if is_finished:
-            self.code_prompt_token_ids.pop(external_req_id, None)
-            cached_ic = getattr(self, "_cached_ic", None)
-            if cached_ic is not None:
-                cached_ic.pop(external_req_id, None)
+            self.cleanup_sender(external_req_id)
 
     ########################################################################
     # Cleanup

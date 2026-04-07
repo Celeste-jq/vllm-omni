@@ -11,6 +11,7 @@ from vllm.transformers_utils.repo_utils import file_or_path_exists
 
 from vllm_omni.config.yaml_util import create_config, load_yaml_config, merge_configs
 from vllm_omni.entrypoints.stage_utils import _to_dict
+from vllm_omni.model_executor.models.voxcpm.native_config import detect_native_voxcpm_model_type
 from vllm_omni.platforms import current_omni_platform
 
 # Get the project root directory (2 levels up from this file)
@@ -242,9 +243,13 @@ def resolve_model_config_path(model: str) -> str:
                 if config_dict and "model_type" in config_dict:
                     model_type = config_dict["model_type"]
                 else:
-                    # For models with empty config.json (e.g. CosyVoice3),
-                    # try matching against registered omni stage configs.
-                    model_type = _try_resolve_omni_model_type(model)
+                    native_model_type = detect_native_voxcpm_model_type(model)
+                    if native_model_type is not None:
+                        model_type = native_model_type
+                    else:
+                        # For models with empty config.json (e.g. CosyVoice3),
+                        # try matching against registered omni stage configs.
+                        model_type = _try_resolve_omni_model_type(model)
                     if model_type is None:
                         raise ValueError(f"config.json found but missing 'model_type' for model: {model}")
             except Exception as e:
