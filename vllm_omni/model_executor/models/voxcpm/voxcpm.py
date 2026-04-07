@@ -7,10 +7,11 @@ import sys
 import tempfile
 import warnings
 import wave
+from collections.abc import Generator, Iterable
 from contextlib import contextmanager
 from hashlib import sha256
 from pathlib import Path
-from typing import Any, Generator, Iterable, List, Optional, Tuple, Type, Union
+from typing import Any
 from unittest.mock import patch
 
 import numpy as np
@@ -86,6 +87,7 @@ def _import_voxcpm_audio_vae_classes():
             # 立刻尝试导入
             try:
                 from voxcpm.modules.audiovae import AudioVAE, AudioVAEConfig
+
                 return AudioVAE, AudioVAEConfig
             except ImportError:
                 pass
@@ -103,6 +105,7 @@ def _import_voxcpm_audio_vae_classes():
             sys.path.insert(0, candidate_str)
         try:
             from voxcpm.modules.audiovae import AudioVAE, AudioVAEConfig
+
             return AudioVAE, AudioVAEConfig
         except ImportError:
             continue
@@ -110,6 +113,7 @@ def _import_voxcpm_audio_vae_classes():
     # 最后尝试 pip 包
     try:
         from voxcpm.modules.audiovae import AudioVAE, AudioVAEConfig
+
         return AudioVAE, AudioVAEConfig
     except ImportError:
         pass
@@ -120,7 +124,7 @@ def _import_voxcpm_audio_vae_classes():
     )
 
 
-def _make_voxcpm_model_for_omni(base: Type[Any]) -> Type[Any]:
+def _make_voxcpm_model_for_omni(base: type[Any]) -> type[Any]:
     """Subclass upstream VoxCPMModel: local ``_inference`` + ``latents_only`` prompt-cache generation."""
 
     from voxcpm.model.utils import get_dtype
@@ -148,7 +152,7 @@ def _make_voxcpm_model_for_omni(base: Type[Any]) -> Type[Any]:
             cfg_value: float = 2.0,
             streaming: bool = False,
             streaming_prefix_len: int = 3,
-        ) -> Generator[Tuple[torch.Tensor, Union[torch.Tensor, List[torch.Tensor]]], None, None]:
+        ) -> Generator[tuple[torch.Tensor, torch.Tensor | list[torch.Tensor]], None, None]:
             """Core inference loop (aligned with upstream ``VoxCPMModel._inference``)."""
             B, _, _, _ = feat.shape
 
@@ -164,7 +168,7 @@ def _make_voxcpm_model_for_omni(base: Type[Any]) -> Type[Any]:
             combined_embed = text_mask.unsqueeze(-1) * text_embed + feat_mask.unsqueeze(-1) * feat_embed
 
             prefix_feat_cond = feat[:, -1, ...]
-            pred_feat_seq: List[torch.Tensor] = []
+            pred_feat_seq: list[torch.Tensor] = []
 
             audio_patch_count = int(feat_mask.sum().item())
             if audio_patch_count > 0:
@@ -248,7 +252,7 @@ def _make_voxcpm_model_for_omni(base: Type[Any]) -> Type[Any]:
             streaming_prefix_len: int = 3,
             latents_only: bool = False,
         ) -> Generator[
-            Tuple[Optional[torch.Tensor], torch.Tensor, Union[torch.Tensor, List[torch.Tensor]]],
+            tuple[torch.Tensor | None, torch.Tensor, torch.Tensor | list[torch.Tensor]],
             None,
             None,
         ]:
@@ -294,14 +298,10 @@ def _make_voxcpm_model_for_omni(base: Type[Any]) -> Type[Any]:
             text_token = torch.cat([text_token, text_pad_token])
             audio_feat = torch.cat([audio_pad_feat, prompt_audio_feat], dim=0)
             text_mask = (
-                torch.cat([torch.ones(text_length), torch.zeros(audio_length)])
-                .type(torch.int32)
-                .to(text_token.device)
+                torch.cat([torch.ones(text_length), torch.zeros(audio_length)]).type(torch.int32).to(text_token.device)
             )
             audio_mask = (
-                torch.cat([torch.zeros(text_length), torch.ones(audio_length)])
-                .type(torch.int32)
-                .to(text_token.device)
+                torch.cat([torch.zeros(text_length), torch.ones(audio_length)]).type(torch.int32).to(text_token.device)
             )
 
             text_token = text_token.unsqueeze(0).to(self.device)
@@ -340,8 +340,9 @@ def _make_voxcpm_model_for_omni(base: Type[Any]) -> Type[Any]:
                     latent_pred, pred_audio_feat = next(inference_result)
                     if retry_badcase:
                         if pred_audio_feat.shape[0] >= target_text_length * retry_badcase_ratio_threshold:
+                            ratio = pred_audio_feat.shape[0] / target_text_length
                             print(
-                                f"  Badcase detected, audio_text_ratio={pred_audio_feat.shape[0] / target_text_length}, retrying...",
+                                f"  Badcase detected, audio_text_ratio={ratio}, retrying...",
                                 file=sys.stderr,
                             )
                             retry_badcase_times += 1
@@ -366,7 +367,7 @@ def _make_voxcpm_model_for_omni(base: Type[Any]) -> Type[Any]:
     return VoxCPMModelForOmni
 
 
-def _import_voxcpm_model_class() -> Type[Any]:
+def _import_voxcpm_model_class() -> type[Any]:
     base = _import_voxcpm_base_model_class()
     return _make_voxcpm_model_for_omni(base)
 
@@ -426,7 +427,7 @@ def _prepare_runtime_model_dir(
         return str(source_dir)
 
     digest = sha256(
-        f"{source_dir.resolve()}:{config_path.read_text()}:{desired_device}:{desired_dtype}".encode("utf-8")
+        f"{source_dir.resolve()}:{config_path.read_text()}:{desired_device}:{desired_dtype}".encode()
     ).hexdigest()[:16]
     runtime_dir = Path(tempfile.gettempdir()) / "vllm_omni_voxcpm_runtime" / digest
     runtime_dir.mkdir(parents=True, exist_ok=True)
@@ -590,7 +591,7 @@ class _DirectVoxCPMLatentGenerator:
         retry_badcase: bool = False,
         retry_badcase_max_times: int = 3,
         retry_badcase_ratio_threshold: float = 6.0,
-    ) -> Generator[Tuple[torch.Tensor, bool], None, None]:
+    ) -> Generator[tuple[torch.Tensor, bool], None, None]:
         """Yield (latent_window, is_last_chunk) for Omni async_chunk latent → VAE."""
         if not isinstance(text, str) or not text.strip():
             raise ValueError("target text must be a non-empty string")
@@ -964,7 +965,7 @@ class VoxCPMForConditionalGeneration(nn.Module):
             out_dev = input_ids.device
 
         infos = runtime_additional_information or [{}]
-        
+
         sample_rate = int(getattr(self._pipeline, "sample_rate", 24000))
         async_chunk = bool(getattr(self.vllm_config.model_config, "async_chunk", False))
         if self.model_stage in self._VAE_STAGES:
@@ -992,9 +993,7 @@ class VoxCPMForConditionalGeneration(nn.Module):
 
         outputs: list[torch.Tensor] = []
         sample_rates: list[torch.Tensor] = []
-        last_chunk_flags: list[bool] | None = (
-            [] if (self.model_stage in self._LATENT_STAGES and async_chunk) else None
-        )
+        last_chunk_flags: list[bool] | None = [] if (self.model_stage in self._LATENT_STAGES and async_chunk) else None
         for info in infos:
             if self.model_stage in self._VAE_STAGES:
                 latent_audio_feat = self._extract_val(info, "latent_audio_feat", None)

@@ -89,9 +89,7 @@ def latent2vae_async_chunk(
     sr = pooling_output.get("sr")
     out: dict[str, Any] = {
         "code_predictor_codes": [0],
-        "latent_audio_feat": latent.detach().cpu().contiguous()
-        if isinstance(latent, torch.Tensor)
-        else latent,
+        "latent_audio_feat": latent.detach().cpu().contiguous() if isinstance(latent, torch.Tensor) else latent,
         "finished": finished_request,
     }
     if isinstance(sr, torch.Tensor):

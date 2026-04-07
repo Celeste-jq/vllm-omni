@@ -412,8 +412,7 @@ class OmniNPUModelRunner(OmniGPUModelRunner, NPUModelRunner):
 
         # NPU-specific: all-gather for sequence parallelism
         if (
-            getattr(forward_context, "flash_comm_v1_enabled", False)
-            or getattr(forward_context, "sp_enabled", False)
+            getattr(forward_context, "flash_comm_v1_enabled", False) or getattr(forward_context, "sp_enabled", False)
         ) and not isinstance(model_output, IntermediateTensors):
             model_output = self._all_gather_hidden_states_and_aux(model_output)
 
