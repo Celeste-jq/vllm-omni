@@ -57,6 +57,11 @@ _OMNI_MODELS = {
         "cosyvoice3",
         "CosyVoice3Model",
     ),
+    "OmniVoiceModel": (
+        "omnivoice",
+        "omnivoice",
+        "OmniVoiceModel",
+    ),
     "MammothModa2Qwen2ForCausalLM": (
         "mammoth_moda2",
         "mammoth_moda2",
@@ -139,6 +144,12 @@ _OMNI_MODELS = {
         "fish_speech",
         "fish_speech_dac_decoder",
         "FishSpeechDACDecoder",
+    ),
+    ## VoxCPM
+    "VoxCPMForConditionalGeneration": (
+        "voxcpm",
+        "voxcpm",
+        "VoxCPMForConditionalGeneration",
     ),
     ## Voxtral TTS
     "VoxtralTTSForConditionalGeneration": (
