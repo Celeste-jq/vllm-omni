@@ -14,33 +14,6 @@ from ..utils.logging import get_connector_logger
 from .base import OmniTransferAdapterBase
 
 logger = get_connector_logger(__name__)
-_MAX_SINGLE_ELEMENT_UNWRAP_DEPTH = 8
-
-
-def _connector_finished_truthy(val: Any) -> bool:
-    """Interpret connector ``finished`` without ``if tensor`` (PyTorch disallows tensor truthiness)."""
-    if val is None:
-        return False
-    if isinstance(val, torch.Tensor):
-        if val.numel() == 0:
-            return False
-        return bool(val.detach().cpu().reshape(-1)[0].item())
-    try:
-        import numpy as np
-
-        if isinstance(val, np.ndarray):
-            if val.size == 0:
-                return False
-            return bool(np.asarray(val.reshape(-1)[0]).item())
-        if isinstance(val, np.generic):
-            return bool(np.asarray(val).item())
-    except ImportError:
-        pass
-    unwrap_depth = 0
-    while isinstance(val, (list, tuple)) and len(val) == 1 and unwrap_depth < _MAX_SINGLE_ELEMENT_UNWRAP_DEPTH:
-        val = val[0]
-        unwrap_depth += 1
-    return bool(val)
 
 
 class OmniChunkTransferAdapter(OmniTransferAdapterBase):
@@ -173,17 +146,45 @@ class OmniChunkTransferAdapter(OmniTransferAdapterBase):
         payload_data, size = result
 
         if payload_data:
+            finished_value = payload_data.get("finished")
+            unwrap_depth = 0
+            while isinstance(finished_value, (list, tuple)) and len(finished_value) == 1 and unwrap_depth < 8:
+                finished_value = finished_value[0]
+                unwrap_depth += 1
+
+            if finished_value is None:
+                finished_flag = False
+            elif isinstance(finished_value, torch.Tensor):
+                if finished_value.numel():
+                    finished_flag = bool(finished_value.detach().cpu().reshape(-1)[0].item())
+                else:
+                    finished_flag = False
+            else:
+                try:
+                    import numpy as np
+
+                    if isinstance(finished_value, np.ndarray):
+                        if finished_value.size:
+                            finished_flag = bool(np.asarray(finished_value.reshape(-1)[0]).item())
+                        else:
+                            finished_flag = False
+                    elif isinstance(finished_value, np.generic):
+                        finished_flag = bool(np.asarray(finished_value).item())
+                    else:
+                        finished_flag = bool(finished_value)
+                except ImportError:
+                    finished_flag = bool(finished_value)
+
             # Update connector state
             self.get_req_chunk[req_id] += 1
 
             if self.model_mode == "ar":
                 self._update_request_payload(external_req_id, payload_data)
                 request.additional_information = payload_data
-                if _connector_finished_truthy(payload_data.get("finished")):
+                if finished_flag:
                     self.finished_requests.add(req_id)
             else:
-                _fin_ok = _connector_finished_truthy(payload_data.get("finished"))
-                if _fin_ok:
+                if finished_flag:
                     self.finished_requests.add(req_id)
 
                 new_ids = payload_data.get("code_predictor_codes", [])
@@ -196,7 +197,7 @@ class OmniChunkTransferAdapter(OmniTransferAdapterBase):
                 request.num_computed_tokens = 0
 
                 # Empty chunk with more data expected: keep polling.
-                if not new_ids and not _fin_ok:
+                if not new_ids and not finished_flag:
                     return True
 
             # Mark as finished for consumption

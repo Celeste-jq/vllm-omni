@@ -12,7 +12,7 @@ import torch
 from einops import rearrange
 from tqdm import tqdm
 
-from .runtime_utils import _build_prompt_cache_with_soundfile, _is_torchcodec_load_error
+from .voxcpm_runtime_utils import _build_prompt_cache_with_soundfile, _is_torchcodec_load_error
 
 
 def _iter_voxcpm_src_candidates() -> list[Path]:

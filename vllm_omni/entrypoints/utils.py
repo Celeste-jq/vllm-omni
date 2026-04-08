@@ -242,17 +242,9 @@ def resolve_model_config_path(model: str) -> str:
                 if config_dict and "model_type" in config_dict:
                     model_type = config_dict["model_type"]
                 else:
-                    from vllm_omni.model_executor.models.voxcpm.native_config import (
-                        detect_native_voxcpm_model_type,
-                    )
-
-                    native_model_type = detect_native_voxcpm_model_type(model)
-                    if native_model_type is not None:
-                        model_type = native_model_type
-                    else:
-                        # For models with empty config.json (e.g. CosyVoice3),
-                        # try matching against registered omni stage configs.
-                        model_type = _try_resolve_omni_model_type(model)
+                    # For models with empty config.json (e.g. CosyVoice3),
+                    # try matching against registered omni stage configs.
+                    model_type = _try_resolve_omni_model_type(model)
                     if model_type is None:
                         raise ValueError(f"config.json found but missing 'model_type' for model: {model}")
             except Exception as e:
