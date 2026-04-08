@@ -53,13 +53,17 @@ class _DirectVoxCPMLatentGenerator:
             retry_badcase_max_times=retry_badcase_max_times,
             retry_badcase_ratio_threshold=retry_badcase_ratio_threshold,
         )
-        try:
-            _, _, pred_audio_feat = self.tts_model.generate_with_prompt_cache(
-                **gen_kw,
-                latents_only=True,
-            )
-        except TypeError:
-            _, _, pred_audio_feat = self.tts_model.generate_with_prompt_cache(**gen_kw)
+        latent_entry = getattr(self.tts_model, "generate_latents_with_prompt_cache", None)
+        if latent_entry is not None:
+            _, _, pred_audio_feat = latent_entry(**gen_kw)
+        else:
+            try:
+                _, _, pred_audio_feat = self.tts_model.generate_with_prompt_cache(
+                    **gen_kw,
+                    latents_only=True,
+                )
+            except TypeError:
+                _, _, pred_audio_feat = self.tts_model.generate_with_prompt_cache(**gen_kw)
         return pred_audio_feat.detach().cpu().to(torch.float32)
 
     def iter_latent_chunks_streaming(
@@ -103,13 +107,16 @@ class _DirectVoxCPMLatentGenerator:
             retry_badcase_max_times=retry_badcase_max_times,
             retry_badcase_ratio_threshold=retry_badcase_ratio_threshold,
             streaming_prefix_len=streaming_prefix_len,
-            latents_only=True,
         )
-        stream_entry = getattr(self.tts_model, "generate_with_prompt_cache_streaming", None)
+        stream_entry = getattr(self.tts_model, "generate_latents_with_prompt_cache_streaming", None)
         if stream_entry is not None:
             gen = stream_entry(**gen_kw)
         else:
-            gen = self.tts_model._generate_with_prompt_cache(streaming=True, **gen_kw)
+            fallback_stream_entry = getattr(self.tts_model, "generate_with_prompt_cache_streaming", None)
+            if fallback_stream_entry is not None:
+                gen = fallback_stream_entry(**gen_kw, latents_only=True)
+            else:
+                gen = self.tts_model._generate_with_prompt_cache(streaming=True, latents_only=True, **gen_kw)
 
         iterator = iter(gen)
         previous = next(iterator, None)
