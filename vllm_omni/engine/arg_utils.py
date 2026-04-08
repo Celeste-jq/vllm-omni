@@ -12,7 +12,6 @@ from vllm_omni.plugins import load_omni_general_plugins
 
 logger = init_logger(__name__)
 
-
 def _register_omni_hf_configs() -> None:
     try:
         from transformers import AutoConfig
@@ -21,6 +20,7 @@ def _register_omni_hf_configs() -> None:
         from vllm_omni.model_executor.models.qwen3_tts.configuration_qwen3_tts import (
             Qwen3TTSConfig,
         )
+        from vllm_omni.model_executor.models.voxcpm.configuration_voxcpm import VoxCPMConfig
         from vllm_omni.model_executor.models.voxtral_tts.configuration_voxtral_tts import (
             VoxtralTTSConfig,
         )
@@ -32,6 +32,7 @@ def _register_omni_hf_configs() -> None:
         ("qwen3_tts", Qwen3TTSConfig),
         ("cosyvoice3", CosyVoice3Config),
         ("voxtral_tts", VoxtralTTSConfig),
+        ("voxcpm", VoxCPMConfig),
     ]:
         try:
             AutoConfig.register(model_type, config_cls)
