@@ -5,9 +5,9 @@ from pathlib import Path
 
 import torch
 
-from .import_utils import _import_voxcpm_audio_vae_classes, _import_voxcpm_model_class
-from .runtime_utils import _force_cuda_available_for_npu, _prepare_runtime_model_dir
-from .stage_wrappers import _DirectVoxCPMAudioVAE, _DirectVoxCPMLatentGenerator
+from .voxcpm_import_utils import _import_voxcpm_audio_vae_classes, _import_voxcpm_model_class
+from .voxcpm_runtime_utils import _force_cuda_available_for_npu, _prepare_runtime_model_dir
+from .voxcpm_stage_wrappers import _DirectVoxCPMAudioVAE, _DirectVoxCPMLatentGenerator
 
 
 def _load_native_voxcpm_model(

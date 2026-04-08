@@ -12,6 +12,18 @@ from vllm_omni.plugins import load_omni_general_plugins
 
 logger = init_logger(__name__)
 
+# Maps model architecture names to their HuggingFace model_type values.
+# Used when auto-injecting hf_overrides for models with missing config.json.
+_ARCH_TO_MODEL_TYPE: dict[str, str] = {
+    "CosyVoice3Model": "cosyvoice3",
+    "OmniVoiceModel": "omnivoice",
+    "VoxCPMForConditionalGeneration": "voxcpm",
+}
+
+# Maps model architecture names to tokenizer subfolder paths within HF repos.
+_TOKENIZER_SUBFOLDER_MAP: dict[str, str] = {
+    "CosyVoice3Model": "CosyVoice-BlankEN",
+}
 def _register_omni_hf_configs() -> None:
     try:
         from transformers import AutoConfig
@@ -20,10 +32,10 @@ def _register_omni_hf_configs() -> None:
         from vllm_omni.model_executor.models.qwen3_tts.configuration_qwen3_tts import (
             Qwen3TTSConfig,
         )
-        from vllm_omni.model_executor.models.voxcpm.configuration_voxcpm import VoxCPMConfig
         from vllm_omni.model_executor.models.voxtral_tts.configuration_voxtral_tts import (
             VoxtralTTSConfig,
         )
+        from vllm_omni.transformers_utils.configs.voxcpm import VoxCPMConfig
     except Exception as exc:  # pragma: no cover - best-effort optional registration
         logger.warning("Skipping omni HF config registration due to import error: %s", exc)
         return

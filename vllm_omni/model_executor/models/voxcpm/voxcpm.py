@@ -1,3 +1,3 @@
-from .model import VoxCPMForConditionalGeneration
+from .voxcpm_model import VoxCPMForConditionalGeneration
 
 __all__ = ["VoxCPMForConditionalGeneration"]

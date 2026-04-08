@@ -211,7 +211,11 @@ def resolve_model_config_path(model: str) -> str:
                 if config_dict and "model_type" in config_dict:
                     model_type = config_dict["model_type"]
                 else:
-                    raise ValueError(f"config.json found but missing 'model_type' for model: {model}")
+                    # For models with empty config.json (e.g. CosyVoice3),
+                    # try matching against registered omni stage configs.
+                    model_type = _try_resolve_omni_model_type(model)
+                    if model_type is None:
+                        raise ValueError(f"config.json found but missing 'model_type' for model: {model}")
             except Exception as e:
                 raise ValueError(f"Failed to read config.json for model: {model}. Error: {e}") from e
         else:
