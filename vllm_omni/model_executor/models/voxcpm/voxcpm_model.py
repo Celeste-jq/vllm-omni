@@ -4,7 +4,7 @@ import os
 import tempfile
 import wave
 from collections.abc import Iterable
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 import torch
@@ -178,6 +178,197 @@ class VoxCPMForConditionalGeneration(nn.Module):
                 return int(hf_config.vocab_size)
         return 32000
 
+    def _make_empty_output(
+        self,
+        *,
+        output_key: str,
+        payload_factory: Callable[[], torch.Tensor],
+        infos: list[dict[str, Any]],
+        sample_rate: int,
+        out_device: torch.device,
+        out_dtype: torch.dtype,
+    ) -> OmniOutput:
+        return OmniOutput(
+            text_hidden_states=torch.zeros((0, 1), device=out_device, dtype=out_dtype),
+            multimodal_outputs={
+                output_key: [payload_factory() for _ in infos],
+                "sr": [torch.tensor(sample_rate, dtype=torch.int32) for _ in infos],
+            },
+        )
+
+    def _finalize_stage_output(
+        self,
+        *,
+        output_key: str,
+        outputs: list[torch.Tensor],
+        sample_rates: list[torch.Tensor],
+        out_device: torch.device,
+        out_dtype: torch.dtype,
+    ) -> OmniOutput:
+        multimodal_outputs: dict[str, Any] = {output_key: outputs, "sr": sample_rates}
+        if outputs:
+            outputs_tensor = torch.stack(outputs)
+            if outputs_tensor.ndim == 1:
+                text_hidden_states = outputs_tensor.unsqueeze(-1)
+            else:
+                text_hidden_states = outputs_tensor.reshape(-1, outputs_tensor.shape[-1])
+        else:
+            text_hidden_states = torch.zeros((0, 1), device=out_device, dtype=out_dtype)
+        text_hidden_states = text_hidden_states.to(device=out_device, dtype=out_dtype)
+        return OmniOutput(
+            text_hidden_states=text_hidden_states,
+            multimodal_outputs=multimodal_outputs,
+        )
+
+    def _forward_vae_stage(
+        self,
+        infos: list[dict[str, Any]],
+        *,
+        sample_rate: int,
+        async_chunk: bool,
+        out_device: torch.device,
+        out_dtype: torch.dtype,
+    ) -> OmniOutput:
+        if all(self._extract_val(info, "latent_audio_feat", None) is None for info in infos):
+            self._ar_emit_stop_token = True
+            return self._make_empty_output(
+                output_key="model_outputs",
+                payload_factory=lambda: torch.zeros((0,), dtype=torch.float32),
+                infos=infos,
+                sample_rate=sample_rate,
+                out_device=out_device,
+                out_dtype=out_dtype,
+            )
+
+        outputs: list[torch.Tensor] = []
+        sample_rates: list[torch.Tensor] = []
+        for info in infos:
+            latent_audio_feat = self._extract_val(info, "latent_audio_feat", None)
+            audio_tensor = self._pipeline.decode(
+                latent_audio_feat,
+                trim_streaming_patch=async_chunk,
+            )
+            outputs.append(audio_tensor.float().cpu())
+            sample_rates.append(torch.tensor(sample_rate, dtype=torch.int32))
+
+        self._ar_emit_stop_token = True
+        return self._finalize_stage_output(
+            output_key="model_outputs",
+            outputs=outputs,
+            sample_rates=sample_rates,
+            out_device=out_device,
+            out_dtype=out_dtype,
+        )
+
+    def _forward_latent_stage(
+        self,
+        infos: list[dict[str, Any]],
+        *,
+        sample_rate: int,
+        async_chunk: bool,
+        out_device: torch.device,
+        out_dtype: torch.dtype,
+    ) -> OmniOutput:
+        texts = [self._extract_val(info, "text", "") for info in infos]
+        if all(not text for text in texts):
+            self._ar_emit_stop_token = True
+            return self._make_empty_output(
+                output_key="latent_audio_feat",
+                payload_factory=lambda: torch.zeros((0,), dtype=torch.float32),
+                infos=infos,
+                sample_rate=sample_rate,
+                out_device=out_device,
+                out_dtype=out_dtype,
+            )
+
+        outputs: list[torch.Tensor] = []
+        sample_rates: list[torch.Tensor] = []
+        last_chunk_flags: list[bool] | None = [] if async_chunk else None
+        for info in infos:
+            text = self._extract_val(info, "text", "")
+            cfg_value = float(self._extract_val(info, "cfg_value", 2.0))
+            inference_timesteps = int(self._extract_val(info, "inference_timesteps", 10))
+            min_len = int(self._extract_val(info, "min_len", 2))
+            max_len = int(self._extract_val(info, "max_len", self._extract_val(info, "max_new_tokens", 4096)))
+            retry_badcase = bool(self._extract_val(info, "retry_badcase", True))
+            retry_badcase_max_times = int(self._extract_val(info, "retry_badcase_max_times", 3))
+            retry_badcase_ratio_threshold = float(self._extract_val(info, "retry_badcase_ratio_threshold", 6.0))
+            streaming_prefix_len = int(self._extract_val(info, "streaming_prefix_len", 3))
+
+            request_key = str(info.get("_omni_req_id", "0"))
+            created_temp: str | None = None
+
+            if async_chunk:
+                if request_key not in self._latent_stream_gens:
+                    prompt_wav_path, prompt_text, temp_prompt_wav = self._resolve_prompt_inputs(info)
+                    created_temp = temp_prompt_wav
+                    self._latent_stream_gens[request_key] = self._pipeline.iter_latent_chunks_streaming(
+                        text=text,
+                        prompt_wav_path=prompt_wav_path,
+                        prompt_text=prompt_text,
+                        cfg_value=cfg_value,
+                        inference_timesteps=inference_timesteps,
+                        min_len=min_len,
+                        max_len=max_len,
+                        streaming_prefix_len=streaming_prefix_len,
+                        retry_badcase=False,
+                        retry_badcase_max_times=retry_badcase_max_times,
+                        retry_badcase_ratio_threshold=retry_badcase_ratio_threshold,
+                    )
+                generator = self._latent_stream_gens[request_key]
+                try:
+                    chunk_latent, is_last = next(generator)
+                except StopIteration:
+                    self._latent_stream_gens.pop(request_key, None)
+                    outputs.append(torch.zeros((0,), dtype=torch.float32))
+                    assert last_chunk_flags is not None
+                    last_chunk_flags.append(True)
+                else:
+                    if is_last:
+                        self._latent_stream_gens.pop(request_key, None)
+                    outputs.append(chunk_latent.detach().float().cpu())
+                    assert last_chunk_flags is not None
+                    last_chunk_flags.append(bool(is_last))
+                finally:
+                    if created_temp is not None and os.path.exists(created_temp):
+                        os.unlink(created_temp)
+                sample_rates.append(torch.tensor(sample_rate, dtype=torch.int32))
+                continue
+
+            prompt_wav_path, prompt_text, temp_prompt_wav = self._resolve_prompt_inputs(info)
+            try:
+                latent_audio_feat = self._pipeline.generate_latents(
+                    text=text,
+                    prompt_wav_path=prompt_wav_path,
+                    prompt_text=prompt_text,
+                    cfg_value=cfg_value,
+                    inference_timesteps=inference_timesteps,
+                    min_len=min_len,
+                    max_len=max_len,
+                    retry_badcase=retry_badcase,
+                    retry_badcase_max_times=retry_badcase_max_times,
+                    retry_badcase_ratio_threshold=retry_badcase_ratio_threshold,
+                )
+                outputs.append(latent_audio_feat.float().cpu())
+            finally:
+                if temp_prompt_wav is not None and os.path.exists(temp_prompt_wav):
+                    os.unlink(temp_prompt_wav)
+
+            sample_rates.append(torch.tensor(sample_rate, dtype=torch.int32))
+
+        if async_chunk and last_chunk_flags:
+            self._ar_emit_stop_token = all(last_chunk_flags)
+        else:
+            self._ar_emit_stop_token = True
+
+        return self._finalize_stage_output(
+            output_key="latent_audio_feat",
+            outputs=outputs,
+            sample_rates=sample_rates,
+            out_device=out_device,
+            out_dtype=out_dtype,
+        )
+
     def compute_logits(self, hidden_states: torch.Tensor | OmniOutput, sampling_metadata: Any = None) -> torch.Tensor:
         del sampling_metadata
         if isinstance(hidden_states, OmniOutput):
@@ -229,134 +420,22 @@ class VoxCPMForConditionalGeneration(nn.Module):
         sample_rate = int(getattr(self._pipeline, "sample_rate", 24000))
         async_chunk = bool(getattr(self.vllm_config.model_config, "async_chunk", False))
         if self.model_stage in self._VAE_STAGES:
-            if all(self._extract_val(info, "latent_audio_feat", None) is None for info in infos):
-                self._ar_emit_stop_token = True
-                return OmniOutput(
-                    text_hidden_states=torch.zeros((0, 1), device=out_device, dtype=out_dtype),
-                    multimodal_outputs={
-                        "model_outputs": [torch.zeros((0,), dtype=torch.float32) for _ in infos],
-                        "sr": [torch.tensor(sample_rate, dtype=torch.int32) for _ in infos],
-                    },
-                )
-        else:
-            texts = [self._extract_val(info, "text", "") for info in infos]
-            if all(not text for text in texts):
-                self._ar_emit_stop_token = True
-                return OmniOutput(
-                    text_hidden_states=torch.zeros((0, 1), device=out_device, dtype=out_dtype),
-                    multimodal_outputs={
-                        "latent_audio_feat": [torch.zeros((0,), dtype=torch.float32) for _ in infos],
-                        "sr": [torch.tensor(sample_rate, dtype=torch.int32) for _ in infos],
-                    },
-                )
-
-        outputs: list[torch.Tensor] = []
-        sample_rates: list[torch.Tensor] = []
-        last_chunk_flags: list[bool] | None = [] if (self.model_stage in self._LATENT_STAGES and async_chunk) else None
-        for info in infos:
-            if self.model_stage in self._VAE_STAGES:
-                latent_audio_feat = self._extract_val(info, "latent_audio_feat", None)
-                audio_tensor = self._pipeline.decode(
-                    latent_audio_feat,
-                    trim_streaming_patch=async_chunk,
-                )
-                outputs.append(audio_tensor.float().cpu())
-                sample_rates.append(torch.tensor(sample_rate, dtype=torch.int32))
-                continue
-
-            text = self._extract_val(info, "text", "")
-            cfg_value = float(self._extract_val(info, "cfg_value", 2.0))
-            inference_timesteps = int(self._extract_val(info, "inference_timesteps", 10))
-            min_len = int(self._extract_val(info, "min_len", 2))
-            max_len = int(self._extract_val(info, "max_len", self._extract_val(info, "max_new_tokens", 4096)))
-            retry_badcase = bool(self._extract_val(info, "retry_badcase", True))
-            retry_badcase_max_times = int(self._extract_val(info, "retry_badcase_max_times", 3))
-            retry_badcase_ratio_threshold = float(self._extract_val(info, "retry_badcase_ratio_threshold", 6.0))
-            streaming_prefix_len = int(self._extract_val(info, "streaming_prefix_len", 3))
-
-            request_key = str(info.get("_omni_req_id", "0"))
-            created_temp: str | None = None
-
-            if self.model_stage in self._LATENT_STAGES and async_chunk:
-                if request_key not in self._latent_stream_gens:
-                    prompt_wav_path, prompt_text, temp_prompt_wav = self._resolve_prompt_inputs(info)
-                    created_temp = temp_prompt_wav
-                    self._latent_stream_gens[request_key] = self._pipeline.iter_latent_chunks_streaming(
-                        text=text,
-                        prompt_wav_path=prompt_wav_path,
-                        prompt_text=prompt_text,
-                        cfg_value=cfg_value,
-                        inference_timesteps=inference_timesteps,
-                        min_len=min_len,
-                        max_len=max_len,
-                        streaming_prefix_len=streaming_prefix_len,
-                        retry_badcase=False,
-                        retry_badcase_max_times=retry_badcase_max_times,
-                        retry_badcase_ratio_threshold=retry_badcase_ratio_threshold,
-                    )
-                generator = self._latent_stream_gens[request_key]
-                try:
-                    chunk_latent, is_last = next(generator)
-                except StopIteration:
-                    self._latent_stream_gens.pop(request_key, None)
-                    outputs.append(torch.zeros((0,), dtype=torch.float32))
-                    assert last_chunk_flags is not None
-                    last_chunk_flags.append(True)
-                else:
-                    if is_last:
-                        self._latent_stream_gens.pop(request_key, None)
-                    outputs.append(chunk_latent.detach().float().cpu())
-                    assert last_chunk_flags is not None
-                    last_chunk_flags.append(bool(is_last))
-                finally:
-                    if created_temp is not None and os.path.exists(created_temp):
-                        os.unlink(created_temp)
-                sample_rates.append(torch.tensor(sample_rate, dtype=torch.int32))
-                continue
-
-            prompt_wav_path, prompt_text, temp_prompt_wav = self._resolve_prompt_inputs(info)
-            try:
-                if self.model_stage in self._LATENT_STAGES:
-                    latent_audio_feat = self._pipeline.generate_latents(
-                        text=text,
-                        prompt_wav_path=prompt_wav_path,
-                        prompt_text=prompt_text,
-                        cfg_value=cfg_value,
-                        inference_timesteps=inference_timesteps,
-                        min_len=min_len,
-                        max_len=max_len,
-                        retry_badcase=retry_badcase,
-                        retry_badcase_max_times=retry_badcase_max_times,
-                        retry_badcase_ratio_threshold=retry_badcase_ratio_threshold,
-                    )
-                    outputs.append(latent_audio_feat.float().cpu())
-            finally:
-                if temp_prompt_wav is not None and os.path.exists(temp_prompt_wav):
-                    os.unlink(temp_prompt_wav)
-
-            sample_rates.append(torch.tensor(sample_rate, dtype=torch.int32))
-
-        output_key = "latent_audio_feat" if self.model_stage in self._LATENT_STAGES else "model_outputs"
-        multimodal_outputs: dict[str, Any] = {output_key: outputs, "sr": sample_rates}
-        if outputs:
-            outputs_tensor = torch.stack(outputs)
-            if outputs_tensor.ndim == 1:
-                text_hidden_states = outputs_tensor.unsqueeze(-1)
-            else:
-                text_hidden_states = outputs_tensor.reshape(-1, outputs_tensor.shape[-1])
-        else:
-            text_hidden_states = torch.zeros((0, 1), device=out_device, dtype=out_dtype)
-        text_hidden_states = text_hidden_states.to(device=out_device, dtype=out_dtype)
-
-        if self.model_stage in self._LATENT_STAGES and async_chunk and last_chunk_flags:
-            self._ar_emit_stop_token = all(last_chunk_flags)
-        else:
-            self._ar_emit_stop_token = True
-
-        return OmniOutput(
-            text_hidden_states=text_hidden_states,
-            multimodal_outputs=multimodal_outputs,
-        )
+            return self._forward_vae_stage(
+                infos,
+                sample_rate=sample_rate,
+                async_chunk=async_chunk,
+                out_device=out_device,
+                out_dtype=out_dtype,
+            )
+        if self.model_stage in self._LATENT_STAGES:
+            return self._forward_latent_stage(
+                infos,
+                sample_rate=sample_rate,
+                async_chunk=async_chunk,
+                out_device=out_device,
+                out_dtype=out_dtype,
+            )
+        raise ValueError(f"Unsupported VoxCPM model_stage at runtime: {self.model_stage}")
 
     def make_empty_intermediate_tensors(
         self, batch_size: int, dtype: torch.dtype, device: torch.device
