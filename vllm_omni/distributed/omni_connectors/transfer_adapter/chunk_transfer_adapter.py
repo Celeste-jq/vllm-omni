@@ -147,11 +147,6 @@ class OmniChunkTransferAdapter(OmniTransferAdapterBase):
 
         if payload_data:
             finished_value = payload_data.get("finished")
-            unwrap_depth = 0
-            while isinstance(finished_value, (list, tuple)) and len(finished_value) == 1 and unwrap_depth < 8:
-                finished_value = finished_value[0]
-                unwrap_depth += 1
-
             if finished_value is None:
                 finished_flag = False
             elif isinstance(finished_value, torch.Tensor):
@@ -160,20 +155,7 @@ class OmniChunkTransferAdapter(OmniTransferAdapterBase):
                 else:
                     finished_flag = False
             else:
-                try:
-                    import numpy as np
-
-                    if isinstance(finished_value, np.ndarray):
-                        if finished_value.size:
-                            finished_flag = bool(np.asarray(finished_value.reshape(-1)[0]).item())
-                        else:
-                            finished_flag = False
-                    elif isinstance(finished_value, np.generic):
-                        finished_flag = bool(np.asarray(finished_value).item())
-                    else:
-                        finished_flag = bool(finished_value)
-                except ImportError:
-                    finished_flag = bool(finished_value)
+                finished_flag = bool(finished_value)
 
             # Update connector state
             self.get_req_chunk[req_id] += 1
