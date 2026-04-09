@@ -56,12 +56,14 @@ def latent2vae(
 
 
 def latent2vae_async_chunk(
-    _transfer_manager: Any,
+    transfer_manager: Any,
     pooling_output: dict[str, Any] | None,
     request: Any,
     is_finished: bool = False,
 ) -> dict[str, Any] | None:
     """Stage-0 latent → stage-1 VAE under ``async_chunk`` (connector payload)."""
+    # Kept for callback signature compatibility with OmniChunkTransferAdapter.
+    _ = transfer_manager
     finished_request = bool(is_finished)
     if callable(getattr(request, "is_finished", None)):
         finished_request = finished_request or bool(request.is_finished())
