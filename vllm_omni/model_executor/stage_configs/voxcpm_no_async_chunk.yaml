@@ -10,6 +10,8 @@ stage_args:
       dtype: bfloat16
       model_stage: latent_generator
       model_arch: VoxCPMForConditionalGeneration
+      # Optional persistent HF-compatible config dir for native VoxCPM models.
+      hf_config_path: ${oc.env:VLLM_OMNI_VOXCPM_HF_CONFIG_PATH,}
       worker_type: ar
       scheduler_cls: vllm_omni.core.sched.omni_ar_scheduler.OmniARScheduler
       enforce_eager: true
@@ -40,6 +42,7 @@ stage_args:
       dtype: float32
       model_stage: vae
       model_arch: VoxCPMForConditionalGeneration
+      hf_config_path: ${oc.env:VLLM_OMNI_VOXCPM_HF_CONFIG_PATH,}
       worker_type: generation
       scheduler_cls: vllm_omni.core.sched.omni_generation_scheduler.OmniGenerationScheduler
       enforce_eager: true
