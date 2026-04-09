@@ -26,8 +26,8 @@ pytest.importorskip("voxcpm")
 
 MODEL = "OpenBMB/VoxCPM1.5"
 STAGE_CONFIG_DIR = Path(__file__).parent.parent.parent.parent / "vllm_omni" / "model_executor" / "stage_configs"
-ASYNC_STAGE_CONFIG = str(STAGE_CONFIG_DIR / "voxcpm.yaml")
-SYNC_STAGE_CONFIG = str(STAGE_CONFIG_DIR / "voxcpm_no_async_chunk.yaml")
+ASYNC_STAGE_CONFIG = str(STAGE_CONFIG_DIR / "voxcpm_async_chunk.yaml")
+SYNC_STAGE_CONFIG = str(STAGE_CONFIG_DIR / "voxcpm.yaml")
 EXTRA_ARGS = ["--trust-remote-code", "--enforce-eager", "--disable-log-stats"]
 
 REF_AUDIO_URL = "https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen3-TTS-Repo/clone_2.wav"

@@ -1,8 +1,8 @@
 """Run a fixed VoxCPM offline-example test matrix.
 
 This script reuses ``end2end.py`` and covers both stage-config routes:
-- streaming: ``voxcpm.yaml``
-- sync: ``voxcpm_no_async_chunk.yaml``
+- streaming: ``voxcpm_async_chunk.yaml``
+- sync: ``voxcpm.yaml``
 
 Scenarios:
 - warmup + single TTS
@@ -28,8 +28,8 @@ from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 END2END_SCRIPT = Path(__file__).with_name("end2end.py")
-DEFAULT_STAGE_ASYNC = REPO_ROOT / "vllm_omni" / "model_executor" / "stage_configs" / "voxcpm.yaml"
-DEFAULT_STAGE_SYNC = REPO_ROOT / "vllm_omni" / "model_executor" / "stage_configs" / "voxcpm_no_async_chunk.yaml"
+DEFAULT_STAGE_ASYNC = REPO_ROOT / "vllm_omni" / "model_executor" / "stage_configs" / "voxcpm_async_chunk.yaml"
+DEFAULT_STAGE_SYNC = REPO_ROOT / "vllm_omni" / "model_executor" / "stage_configs" / "voxcpm.yaml"
 
 SINGLE_TTS_TEXT = "This is a single text-to-speech smoke test for VoxCPM on vLLM Omni."
 SINGLE_CLONE_TEXT = "This sentence is synthesized with the cloned voice for validation."
@@ -242,7 +242,10 @@ def _base_command(args: argparse.Namespace, mode: ModeSpec, output_dir: Path) ->
 
 
 def _extract_summary_blocks(log_text: str) -> list[dict[str, Any]]:
-    marker = "[Summary]"
+    return _extract_literal_blocks(log_text, "[Summary]")
+
+
+def _extract_literal_blocks(log_text: str, marker: str) -> list[dict[str, Any]]:
     results: list[dict[str, Any]] = []
     cursor = 0
     while True:
@@ -303,7 +306,15 @@ def _extract_summary_blocks(log_text: str) -> list[dict[str, Any]]:
     return results
 
 
-def _normalize_request_summaries(summary_blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _extract_offline_metrics_blocks(log_text: str) -> list[dict[str, Any]]:
+    return _extract_literal_blocks(log_text, "[OfflineMetrics]")
+
+
+def _normalize_request_summaries(
+    summary_blocks: list[dict[str, Any]],
+    offline_metrics: dict[str, dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    offline_metrics = offline_metrics or {}
     normalized: list[dict[str, Any]] = []
     for summary in summary_blocks:
         overall = summary.get("overall_summary", {})
@@ -324,6 +335,7 @@ def _normalize_request_summaries(summary_blocks: list[dict[str, Any]]) -> list[d
                 stage_wall_times[stage_name] = float(value)
 
         e2e_stats = e2e_table[0] if e2e_table and isinstance(e2e_table[0], dict) else {}
+        metrics = offline_metrics.get(str(request_id), {})
         normalized.append(
             {
                 "request_id": request_id,
@@ -332,9 +344,23 @@ def _normalize_request_summaries(summary_blocks: list[dict[str, Any]]) -> list[d
                 "e2e_total_tokens": int(e2e_stats.get("e2e_total_tokens", 0)),
                 "transfers_total_time_ms": float(e2e_stats.get("transfers_total_time_ms", 0.0)),
                 "transfers_total_kbytes": float(e2e_stats.get("transfers_total_kbytes", 0.0)),
+                "ttfp_ms": float(metrics["ttfp_ms"]) if metrics.get("ttfp_ms") is not None else None,
+                "audio_duration_s": float(metrics.get("audio_duration_s", 0.0)),
+                "rtf": float(metrics["rtf"]) if metrics.get("rtf") is not None else None,
             }
         )
     return normalized
+
+
+def _collect_request_summaries_from_log(log_text: str) -> list[dict[str, Any]]:
+    summary_blocks = _extract_summary_blocks(log_text)
+    metrics_blocks = _extract_offline_metrics_blocks(log_text)
+    metrics_by_request_id = {
+        str(item["request_id"]): item
+        for item in metrics_blocks
+        if isinstance(item, dict) and item.get("request_id") is not None
+    }
+    return _normalize_request_summaries(summary_blocks, metrics_by_request_id)
 
 
 def _print_request_summaries(request_summaries: list[dict[str, Any]]) -> None:
@@ -347,8 +373,11 @@ def _print_request_summaries(request_summaries: list[dict[str, Any]]) -> None:
             f"{stage_name}={stage_ms:.2f}ms" for stage_name, stage_ms in sorted(item["stage_wall_time_ms"].items())
         ]
         stage_text = ", ".join(stage_parts) if stage_parts else "no stage data"
+        ttfp_text = f", ttfp={item['ttfp_ms']:.2f}ms" if item.get("ttfp_ms") is not None else ""
+        rtf_text = f", rtf={item['rtf']:.3f}" if item.get("rtf") is not None else ""
         print(
-            f"- {item['request_id']}: {stage_text}, e2e={item['e2e_total_ms']:.2f}ms, tokens={item['e2e_total_tokens']}"
+            f"- {item['request_id']}: {stage_text}, e2e={item['e2e_total_ms']:.2f}ms, "
+            f"tokens={item['e2e_total_tokens']}{ttfp_text}{rtf_text}"
         )
 
 
@@ -428,8 +457,7 @@ def _run_case(
         process.wait()
     elapsed_s = time.perf_counter() - start
     completed_returncode = int(process.returncode or 0)
-    summary_blocks = _extract_summary_blocks("".join(captured_lines))
-    request_summaries = _normalize_request_summaries(summary_blocks)
+    request_summaries = _collect_request_summaries_from_log("".join(captured_lines))
     _print_request_summaries(request_summaries)
     summary_json_path = case_output_dir / "summary.json"
     summary_json_path.write_text(
@@ -491,7 +519,9 @@ def main() -> int:
                 f"{stage_name}={stage_ms:.2f}ms" for stage_name, stage_ms in sorted(item["stage_wall_time_ms"].items())
             ]
             stage_text = ", ".join(stage_parts) if stage_parts else "no stage data"
-            print(f"  request={item['request_id']}, {stage_text}, e2e={item['e2e_total_ms']:.2f}ms")
+            ttfp_text = f", ttfp={item['ttfp_ms']:.2f}ms" if item.get("ttfp_ms") is not None else ""
+            rtf_text = f", rtf={item['rtf']:.3f}" if item.get("rtf") is not None else ""
+            print(f"  request={item['request_id']}, {stage_text}, e2e={item['e2e_total_ms']:.2f}ms{ttfp_text}{rtf_text}")
 
     print(f"Passed: {passed}/{len(results)}")
     results_json_path = output_root / "results.json"

@@ -14,10 +14,10 @@ MODEL="${VOXCPM_MODEL:-OpenBMB/VoxCPM1.5}"
 
 case "$MODE" in
     async)
-        STAGE_CONFIG="vllm_omni/model_executor/stage_configs/voxcpm.yaml"
+        STAGE_CONFIG="vllm_omni/model_executor/stage_configs/voxcpm_async_chunk.yaml"
         ;;
     sync)
-        STAGE_CONFIG="vllm_omni/model_executor/stage_configs/voxcpm_no_async_chunk.yaml"
+        STAGE_CONFIG="vllm_omni/model_executor/stage_configs/voxcpm.yaml"
         ;;
     *)
         echo "Unknown mode: $MODE"

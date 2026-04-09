@@ -47,7 +47,7 @@ You can also launch the server directly:
 
 ```bash
 vllm serve "$VOXCPM_MODEL" \
-    --stage-configs-path vllm_omni/model_executor/stage_configs/voxcpm.yaml \
+    --stage-configs-path vllm_omni/model_executor/stage_configs/voxcpm_async_chunk.yaml \
     --trust-remote-code \
     --enforce-eager \
     --omni \
@@ -143,12 +143,12 @@ VoxCPM online serving does not use these generic TTS fields:
 
 ## Streaming vs Non-Streaming
 
-- `voxcpm.yaml` enables async-chunk streaming and is best for single-request streaming latency.
-- `voxcpm_no_async_chunk.yaml` performs one-shot latent generation then VAE decode.
+- `voxcpm_async_chunk.yaml` enables async-chunk streaming and is best for single-request streaming latency.
+- `voxcpm.yaml` performs one-shot latent generation then VAE decode.
 
-Like native VoxCPM, the async streaming path should be treated as single-request. If you need stable throughput benchmarking, prefer `voxcpm_no_async_chunk.yaml`.
+Like native VoxCPM, the async streaming path should be treated as single-request. If you need stable throughput benchmarking, prefer `voxcpm.yaml`.
 
-Do not use `voxcpm.yaml` for concurrent online streaming or `/v1/audio/speech/batch`. For multiple requests, prefer `voxcpm_no_async_chunk.yaml`.
+Do not use `voxcpm_async_chunk.yaml` for concurrent online streaming or `/v1/audio/speech/batch`. For multiple requests, prefer `voxcpm.yaml`.
 
 ## Benchmark
 

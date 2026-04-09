@@ -12,7 +12,7 @@ Async-chunk:
 
 ```bash
 vllm serve /path/to/voxcpm-model \
-    --stage-configs-path vllm_omni/model_executor/stage_configs/voxcpm.yaml \
+    --stage-configs-path vllm_omni/model_executor/stage_configs/voxcpm_async_chunk.yaml \
     --trust-remote-code \
     --enforce-eager \
     --omni \
@@ -23,7 +23,7 @@ Non-streaming:
 
 ```bash
 vllm serve /path/to/voxcpm-model \
-    --stage-configs-path vllm_omni/model_executor/stage_configs/voxcpm_no_async_chunk.yaml \
+    --stage-configs-path vllm_omni/model_executor/stage_configs/voxcpm.yaml \
     --trust-remote-code \
     --enforce-eager \
     --omni \
@@ -58,5 +58,5 @@ python benchmarks/voxcpm/vllm_omni/bench_tts_serve.py \
 
 - The benchmark uses `stream=true` and `response_format=pcm` so TTFP is measured from the first audio packet.
 - `RTF < 1.0` means the server generates audio faster than real time.
-- For `voxcpm.yaml`, keep concurrency at `1`. This matches native VoxCPM streaming more closely.
-- Do not benchmark concurrent online streaming on `voxcpm.yaml`; use `voxcpm_no_async_chunk.yaml` for multi-request throughput runs.
+- For `voxcpm_async_chunk.yaml`, keep concurrency at `1`. This matches native VoxCPM streaming more closely.
+- Do not benchmark concurrent online streaming on `voxcpm_async_chunk.yaml`; use `voxcpm.yaml` for multi-request throughput runs.
