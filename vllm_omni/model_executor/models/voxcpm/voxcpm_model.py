@@ -15,8 +15,13 @@ from vllm.sequence import IntermediateTensors
 
 from vllm_omni.model_executor.models.output_templates import OmniOutput
 
-from .voxcpm_native_loader import _load_native_voxcpm_audio_vae, _load_native_voxcpm_latent_generator
-from .voxcpm_runtime_utils import _device_to_string, _normalize_dtype_name, _resolve_runtime_device
+from .utils import (
+    _device_to_string,
+    _load_native_voxcpm_audio_vae,
+    _load_native_voxcpm_latent_generator,
+    _normalize_dtype_name,
+    _resolve_runtime_device,
+)
 
 logger = init_logger(__name__)
 

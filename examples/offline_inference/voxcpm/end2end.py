@@ -28,8 +28,8 @@ from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm_omni import AsyncOmni, Omni
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-DEFAULT_STAGE_ASYNC = REPO_ROOT / "vllm_omni" / "model_executor" / "stage_configs" / "voxcpm.yaml"
-DEFAULT_STAGE_SYNC = REPO_ROOT / "vllm_omni" / "model_executor" / "stage_configs" / "voxcpm_no_async_chunk.yaml"
+DEFAULT_STAGE_ASYNC = REPO_ROOT / "vllm_omni" / "model_executor" / "stage_configs" / "voxcpm_async_chunk.yaml"
+DEFAULT_STAGE_SYNC = REPO_ROOT / "vllm_omni" / "model_executor" / "stage_configs" / "voxcpm.yaml"
 
 logger = logging.getLogger(__name__)
 
@@ -92,6 +92,22 @@ def _extract_sample_rate(mm: dict[str, Any]) -> int:
     if hasattr(sr_raw, "item"):
         return int(sr_raw.item())
     return int(sr_raw)
+
+
+def _emit_offline_metrics(
+    *,
+    request_id: str,
+    elapsed_s: float,
+    first_audio_elapsed: float | None,
+    audio_duration_s: float,
+) -> None:
+    metrics = {
+        "request_id": request_id,
+        "ttfp_ms": round(first_audio_elapsed * 1000.0, 3) if first_audio_elapsed is not None else None,
+        "audio_duration_s": round(audio_duration_s, 6),
+        "rtf": round(elapsed_s / audio_duration_s, 6) if audio_duration_s > 0 else None,
+    }
+    print(f"[OfflineMetrics] {metrics}")
 
 
 def _save_wav(mm: dict[str, Any], output_dir: Path, request_id: str) -> Path:
@@ -402,9 +418,9 @@ def parse_args():
 def _is_streaming_stage_config(stage_configs_path: str) -> bool:
     cfg_name = Path(stage_configs_path).name.lower()
     # Keep routing purely config-path based:
-    # - voxcpm_no_async_chunk.yaml => sync
-    # - others (e.g., voxcpm.yaml with async_chunk) => streaming
-    return "no_async_chunk" not in cfg_name
+    # - voxcpm.yaml => sync
+    # - voxcpm_async_chunk.yaml => streaming
+    return "async_chunk" in cfg_name
 
 
 async def _collect_streaming_audio(
@@ -499,10 +515,18 @@ async def _run_streaming_single(
     )
     output_path = output_dir / f"output_run{run_index + 1}_{spec.label}.wav"
     sf.write(output_path, audio_cat.numpy(), sample_rate, format="WAV")
-    ttfa_text = f", ttfa={first_audio_elapsed:.2f}s" if first_audio_elapsed is not None else ""
+    audio_duration_s = float(audio_cat.numel()) / float(sample_rate) if sample_rate > 0 else 0.0
+    ttfp_text = f", ttfp={first_audio_elapsed:.2f}s" if first_audio_elapsed is not None else ""
+    rtf_text = f", rtf={elapsed / audio_duration_s:.3f}" if audio_duration_s > 0 else ""
     print(
         f"Saved (streaming) run {run_index + 1}/{num_runs}, "
-        f"prompt {prompt_index + 1}/{prompt_count}: {output_path} ({elapsed:.2f}s{ttfa_text})"
+        f"prompt {prompt_index + 1}/{prompt_count}: {output_path} ({elapsed:.2f}s{ttfp_text}{rtf_text})"
+    )
+    _emit_offline_metrics(
+        request_id=request_id,
+        elapsed_s=elapsed,
+        first_audio_elapsed=first_audio_elapsed,
+        audio_duration_s=audio_duration_s,
     )
     return output_path
 
@@ -534,12 +558,12 @@ async def _run_streaming_warmup(args, omni: AsyncOmni) -> None:
             )
         results = await asyncio.gather(*tasks)
         total_samples = sum(int(audio.numel()) for audio, _, _, _ in results)
-        warmup_ttfas = [ttfa for _, _, _, ttfa in results if ttfa is not None]
-        ttfa_text = f", first_audio={min(warmup_ttfas):.2f}s" if warmup_ttfas else ""
+        warmup_ttfps = [ttfp for _, _, _, ttfp in results if ttfp is not None]
+        ttfp_text = f", ttfp={min(warmup_ttfps):.2f}s" if warmup_ttfps else ""
         print(
             f"Warmup (streaming) {warmup_index + 1}/{args.warmup_runs} finished: "
             f"{len(results)} prompt(s), {total_samples} sample(s) "
-            f"({time.perf_counter() - t_warmup:.2f}s{ttfa_text})"
+            f"({time.perf_counter() - t_warmup:.2f}s{ttfp_text})"
         )
 
 
@@ -615,7 +639,7 @@ def _run_sync(args) -> list[Path]:
         request_prefix: str,
         save_outputs: bool,
         run_index: int | None = None,
-    ) -> tuple[list[Path], int, float | None]:
+    ) -> tuple[list[Path], int, float | None, float, float, str]:
         global_request_id = f"{request_prefix}_{spec.label}"
         prompt = _build_prompt_for_spec(args, spec, global_request_id=global_request_id)
         if save_outputs and run_index == 0 and spec.label == "item001":
@@ -624,17 +648,30 @@ def _run_sync(args) -> list[Path]:
         saved_paths: list[Path] = []
         output_count = 0
         first_audio_elapsed: float | None = None
+        total_audio_duration_s = 0.0
+        metrics_request_id = global_request_id
         t_start = time.perf_counter()
         for stage_outputs in omni.generate(prompt):
             request_output = stage_outputs.request_output
             if request_output is None:
                 continue
+            request_output_id = getattr(request_output, "request_id", None)
+            if isinstance(request_output_id, str) and request_output_id:
+                metrics_request_id = request_output_id
             for j, mm in enumerate(_iter_request_multimodal_outputs(request_output)):
                 output_count += 1
                 if first_audio_elapsed is None:
                     try:
-                        if int(_extract_audio_tensor(mm).numel()) > 0:
+                        audio_tensor = _extract_audio_tensor(mm)
+                        if int(audio_tensor.numel()) > 0:
                             first_audio_elapsed = time.perf_counter() - t_start
+                        total_audio_duration_s += float(audio_tensor.numel()) / float(_extract_sample_rate(mm))
+                    except ValueError:
+                        pass
+                else:
+                    try:
+                        audio_tensor = _extract_audio_tensor(mm)
+                        total_audio_duration_s += float(audio_tensor.numel()) / float(_extract_sample_rate(mm))
                     except ValueError:
                         pass
                 if not save_outputs:
@@ -644,7 +681,8 @@ def _run_sync(args) -> list[Path]:
 
         if output_count == 0:
             raise RuntimeError("No output from Omni.generate")
-        return saved_paths, output_count, first_audio_elapsed
+        elapsed_s = time.perf_counter() - t_start
+        return saved_paths, output_count, first_audio_elapsed, elapsed_s, total_audio_duration_s, metrics_request_id
 
     if args.warmup_runs:
         warmup_specs = _get_warmup_specs(args.prompt_specs)
@@ -654,15 +692,16 @@ def _run_sync(args) -> list[Path]:
         )
         for warmup_index in range(args.warmup_runs):
             t_warmup = time.perf_counter()
-            _, output_count, first_audio_elapsed = _run_sync_single(
+            _, output_count, first_audio_elapsed, elapsed_s, audio_duration_s, _ = _run_sync_single(
                 warmup_specs[0],
                 request_prefix=f"warmup_sync{warmup_index + 1}",
                 save_outputs=False,
             )
-            ttfa_text = f", first_audio={first_audio_elapsed:.2f}s" if first_audio_elapsed is not None else ""
+            ttfp_text = f", ttfp={first_audio_elapsed:.2f}s" if first_audio_elapsed is not None else ""
+            rtf_text = f", rtf={elapsed_s / audio_duration_s:.3f}" if audio_duration_s > 0 else ""
             print(
                 f"Warmup (sync) {warmup_index + 1}/{args.warmup_runs} finished: "
-                f"{output_count} output(s) ({time.perf_counter() - t_warmup:.2f}s{ttfa_text})"
+                f"{output_count} output(s) ({time.perf_counter() - t_warmup:.2f}s{ttfp_text}{rtf_text})"
             )
 
     profiler_started = False
@@ -682,17 +721,24 @@ def _run_sync(args) -> list[Path]:
             t_run = time.perf_counter()
             run_paths: list[Path] = []
             for prompt_index, spec in enumerate(prompt_specs):
-                prompt_paths, _, first_audio_elapsed = _run_sync_single(
+                prompt_paths, _, first_audio_elapsed, elapsed_s, audio_duration_s, metrics_request_id = _run_sync_single(
                     spec,
                     request_prefix=f"sync_run{run + 1}_{prompt_index + 1:03d}",
                     save_outputs=True,
                     run_index=run,
                 )
                 run_paths.extend(prompt_paths)
-                ttfa_text = f", ttfa={first_audio_elapsed:.2f}s" if first_audio_elapsed is not None else ""
+                ttfp_text = f", ttfp={first_audio_elapsed:.2f}s" if first_audio_elapsed is not None else ""
+                rtf_text = f", rtf={elapsed_s / audio_duration_s:.3f}" if audio_duration_s > 0 else ""
                 print(
                     f"Saved (sync) run {run + 1}/{args.num_runs}, "
-                    f"prompt {prompt_index + 1}/{len(prompt_specs)}: {len(prompt_paths)} file(s){ttfa_text}"
+                    f"prompt {prompt_index + 1}/{len(prompt_specs)}: {len(prompt_paths)} file(s){ttfp_text}{rtf_text}"
+                )
+                _emit_offline_metrics(
+                    request_id=metrics_request_id,
+                    elapsed_s=elapsed_s,
+                    first_audio_elapsed=first_audio_elapsed,
+                    audio_duration_s=audio_duration_s,
                 )
 
             saved_paths.extend(run_paths)
