@@ -146,27 +146,16 @@ class OmniChunkTransferAdapter(OmniTransferAdapterBase):
         payload_data, size = result
 
         if payload_data:
-            finished_value = payload_data.get("finished")
-            if finished_value is None:
-                finished_flag = False
-            elif isinstance(finished_value, torch.Tensor):
-                if finished_value.numel():
-                    finished_flag = bool(finished_value.detach().cpu().reshape(-1)[0].item())
-                else:
-                    finished_flag = False
-            else:
-                finished_flag = bool(finished_value)
-
             # Update connector state
             self.get_req_chunk[req_id] += 1
 
             if self.model_mode == "ar":
                 self._update_request_payload(external_req_id, payload_data)
                 request.additional_information = payload_data
-                if finished_flag:
+                if payload_data.get("finished"):
                     self.finished_requests.add(req_id)
             else:
-                if finished_flag:
+                if payload_data.get("finished"):
                     self.finished_requests.add(req_id)
 
                 new_ids = payload_data.get("code_predictor_codes", [])
@@ -179,7 +168,7 @@ class OmniChunkTransferAdapter(OmniTransferAdapterBase):
                 request.num_computed_tokens = 0
 
                 # Empty chunk with more data expected: keep polling.
-                if not new_ids and not finished_flag:
+                if not new_ids and not payload_data.get("finished"):
                     return True
 
             # Mark as finished for consumption
