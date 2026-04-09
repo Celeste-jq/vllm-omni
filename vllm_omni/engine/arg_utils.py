@@ -24,6 +24,8 @@ _ARCH_TO_MODEL_TYPE: dict[str, str] = {
 _TOKENIZER_SUBFOLDER_MAP: dict[str, str] = {
     "CosyVoice3Model": "CosyVoice-BlankEN",
 }
+
+
 def _register_omni_hf_configs() -> None:
     try:
         from transformers import AutoConfig
