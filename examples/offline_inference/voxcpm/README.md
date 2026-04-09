@@ -49,19 +49,12 @@ export VLLM_OMNI_VOXCPM_HF_CONFIG_PATH=/tmp/voxcpm_hf_config
 mkdir -p "$VLLM_OMNI_VOXCPM_HF_CONFIG_PATH"
 cp "$VOXCPM_MODEL/config.json" "$VLLM_OMNI_VOXCPM_HF_CONFIG_PATH/config.json"
 cp "$VOXCPM_MODEL/generation_config.json" "$VLLM_OMNI_VOXCPM_HF_CONFIG_PATH/generation_config.json" 2>/dev/null || true
-python - <<'PY'
-import json, os
-path = os.path.join(os.environ["VLLM_OMNI_VOXCPM_HF_CONFIG_PATH"], "config.json")
-cfg = json.load(open(path))
-cfg["model_type"] = "voxcpm"
-cfg.setdefault("architectures", ["VoxCPMForConditionalGeneration"])
-json.dump(cfg, open(path, "w"), indent=2, ensure_ascii=False)
-PY
+python3 -c 'import json, os; p=os.path.join(os.environ["VLLM_OMNI_VOXCPM_HF_CONFIG_PATH"], "config.json"); cfg=json.load(open(p, "r", encoding="utf-8")); cfg["model_type"]="voxcpm"; cfg.setdefault("architectures", ["VoxCPMForConditionalGeneration"]); json.dump(cfg, open(p, "w", encoding="utf-8"), indent=2, ensure_ascii=False)'
 ```
 
 The VoxCPM stage configs read this environment variable directly. If you have
 already patched the model directory itself to include `model_type`, this extra
-directory is not required.
+directory is not required. The `python3 -c` form above avoids heredoc/indentation issues in interactive shells.
 
 ## Quick Start
 
