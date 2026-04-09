@@ -34,11 +34,27 @@ pip install soundfile
 
 ## Model Path
 
-Pass the native VoxCPM model directory directly. The original VoxCPM `config.json` can stay in native format. `vllm-omni` will render the HF-compatible config it needs at runtime.
+Pass the native VoxCPM model directory directly.
 
 ```bash
 export VOXCPM_MODEL=/path/to/voxcpm-model
 ```
+
+If your native VoxCPM `config.json` does not include HF metadata such as
+`model_type`, prepare one persistent HF-compatible config directory and point
+the stage configs to it through `VLLM_OMNI_VOXCPM_HF_CONFIG_PATH`:
+
+```bash
+export VLLM_OMNI_VOXCPM_HF_CONFIG_PATH=/tmp/voxcpm_hf_config
+mkdir -p "$VLLM_OMNI_VOXCPM_HF_CONFIG_PATH"
+cp "$VOXCPM_MODEL/config.json" "$VLLM_OMNI_VOXCPM_HF_CONFIG_PATH/config.json"
+cp "$VOXCPM_MODEL/generation_config.json" "$VLLM_OMNI_VOXCPM_HF_CONFIG_PATH/generation_config.json" 2>/dev/null || true
+python3 -c 'import json, os; p=os.path.join(os.environ["VLLM_OMNI_VOXCPM_HF_CONFIG_PATH"], "config.json"); cfg=json.load(open(p, "r", encoding="utf-8")); cfg["model_type"]="voxcpm"; cfg.setdefault("architectures", ["VoxCPMForConditionalGeneration"]); json.dump(cfg, open(p, "w", encoding="utf-8"), indent=2, ensure_ascii=False)'
+```
+
+The VoxCPM stage configs read this environment variable directly. If you have
+already patched the model directory itself to include `model_type`, this extra
+directory is not required. The `python3 -c` form above avoids heredoc/indentation issues in interactive shells.
 
 ## Quick Start
 
@@ -183,5 +199,6 @@ Both pipelines use `async_chunk: true`, [`OmniChunkTransferAdapter`](../../../vl
 - This branch keeps the split-stage `latent_generator -> vae` pipeline.
 - Both streaming and non-streaming offline inference are kept.
 - It does not include the single-stage `voxcpm_full.yaml` path.
-- It does not include the OpenAI-compatible online speech serving adaptation.
 - Voice cloning always requires `ref_audio` and `ref_text` together, whether passed globally or inside JSONL rows.
+
+For OpenAI-compatible serving examples, see [examples/online_serving/voxcpm](../../online_serving/voxcpm/README.md).

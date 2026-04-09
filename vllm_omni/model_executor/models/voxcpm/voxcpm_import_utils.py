@@ -198,6 +198,66 @@ def _make_voxcpm_model_for_omni(base: type[Any]) -> type[Any]:
                 yield feat_pred, pred_feat_seq_cat.squeeze(0).cpu()
 
         @torch.inference_mode()
+        def generate_latents_with_prompt_cache(
+            self,
+            target_text: str,
+            prompt_cache: dict,
+            min_len: int = 2,
+            max_len: int = 2000,
+            inference_timesteps: int = 10,
+            cfg_value: float = 2.0,
+            retry_badcase: bool = False,
+            retry_badcase_max_times: int = 3,
+            retry_badcase_ratio_threshold: float = 6.0,
+            streaming_prefix_len: int = 3,
+        ) -> tuple[None, torch.Tensor, torch.Tensor]:
+            return next(
+                self._generate_with_prompt_cache(
+                    target_text=target_text,
+                    prompt_cache=prompt_cache,
+                    min_len=min_len,
+                    max_len=max_len,
+                    inference_timesteps=inference_timesteps,
+                    cfg_value=cfg_value,
+                    retry_badcase=retry_badcase,
+                    retry_badcase_max_times=retry_badcase_max_times,
+                    retry_badcase_ratio_threshold=retry_badcase_ratio_threshold,
+                    streaming=False,
+                    streaming_prefix_len=streaming_prefix_len,
+                    latents_only=True,
+                )
+            )
+
+        @torch.inference_mode()
+        def generate_latents_with_prompt_cache_streaming(
+            self,
+            target_text: str,
+            prompt_cache: dict,
+            min_len: int = 2,
+            max_len: int = 2000,
+            inference_timesteps: int = 10,
+            cfg_value: float = 2.0,
+            retry_badcase: bool = False,
+            retry_badcase_max_times: int = 3,
+            retry_badcase_ratio_threshold: float = 6.0,
+            streaming_prefix_len: int = 3,
+        ) -> Generator[tuple[None, torch.Tensor, torch.Tensor], None, None]:
+            return self._generate_with_prompt_cache(
+                target_text=target_text,
+                prompt_cache=prompt_cache,
+                min_len=min_len,
+                max_len=max_len,
+                inference_timesteps=inference_timesteps,
+                cfg_value=cfg_value,
+                retry_badcase=retry_badcase,
+                retry_badcase_max_times=retry_badcase_max_times,
+                retry_badcase_ratio_threshold=retry_badcase_ratio_threshold,
+                streaming=True,
+                streaming_prefix_len=streaming_prefix_len,
+                latents_only=True,
+            )
+
+        @torch.inference_mode()
         def _generate_with_prompt_cache(
             self,
             target_text: str,
