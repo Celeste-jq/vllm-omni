@@ -62,6 +62,7 @@ class VoxCPMConfig(PretrainedConfig):
         self.dtype = dtype
         self.dit_mean_mode = dit_mean_mode
 
+
 AutoConfig.register("voxcpm", VoxCPMConfig)
 
 __all__ = ["VoxCPMConfig"]
