@@ -263,7 +263,7 @@ def _make_voxcpm_model_for_omni(base: type[Any]) -> type[Any]:
         def build_prompt_cache(self, *args: Any, **kwargs: Any):
             try:
                 return super().build_prompt_cache(*args, **kwargs)
-            except (ImportError, ModuleNotFoundError) as exc:
+            except (ImportError, ModuleNotFoundError, RuntimeError) as exc:
                 if not _is_torchcodec_load_error(exc):
                     raise
                 return _build_prompt_cache_with_soundfile(self, *args, **kwargs)
