@@ -194,7 +194,7 @@ class VoxCPMForConditionalGeneration(nn.Module):
         out_dtype: torch.dtype,
     ) -> OmniOutput:
         return OmniOutput(
-            text_hidden_states=torch.zeros((0, 1), device=out_device, dtype=out_dtype),
+            text_hidden_states=torch.zeros((len(infos), 1), device=out_device, dtype=out_dtype),
             multimodal_outputs={
                 output_key: [payload_factory() for _ in infos],
                 "sr": [torch.tensor(sample_rate, dtype=torch.int32) for _ in infos],
