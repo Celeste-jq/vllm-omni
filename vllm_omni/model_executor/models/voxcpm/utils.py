@@ -501,14 +501,15 @@ def _make_voxcpm_model_for_omni(base: type[Any]) -> type[Any]:
             target_text_length = len(self.text_tokenizer(target_text))
             retry_badcase_times = 0
             while retry_badcase_times < retry_badcase_max_times:
-                max_len_cap = min(int(target_text_length * retry_badcase_ratio_threshold + 10), max_len)
                 inference_result = self._inference(
                     text_token,
                     text_mask,
                     audio_feat,
                     audio_mask,
                     min_len=min_len,
-                    max_len=max_len if not retry_badcase else max_len_cap,
+                    max_len=max_len
+                    if not retry_badcase
+                    else min(int(target_text_length * retry_badcase_ratio_threshold + 10), max_len),
                     inference_timesteps=inference_timesteps,
                     cfg_value=cfg_value,
                     streaming=streaming,
