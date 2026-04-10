@@ -5,8 +5,8 @@ This directory contains the minimal offline example for running native VoxCPM in
 It covers:
 
 - split-stage offline inference
-- streaming with `vllm_omni/model_executor/stage_configs/voxcpm.yaml`
-- non-streaming with `vllm_omni/model_executor/stage_configs/voxcpm_no_async_chunk.yaml`
+- streaming with `vllm_omni/model_executor/stage_configs/voxcpm_async_chunk.yaml`
+- non-streaming with `vllm_omni/model_executor/stage_configs/voxcpm.yaml`
 - text-only synthesis
 - voice cloning with `ref_audio` + `ref_text`
 - text-to-speech batch inputs from `--txt-prompts`
@@ -126,19 +126,19 @@ Streaming:
 ```bash
 python examples/offline_inference/voxcpm/end2end.py \
   --model "$VOXCPM_MODEL" \
-  --stage-configs-path vllm_omni/model_executor/stage_configs/voxcpm.yaml \
+  --stage-configs-path vllm_omni/model_executor/stage_configs/voxcpm_async_chunk.yaml \
   --text "This is a split-stage VoxCPM synthesis example running on vLLM Omni."
 ```
 
 Generated audio is saved to `output_audio/` by default for non-streaming, and to
 `output_audio_streaming/` by default for streaming.
 
-Streaming mode is currently limited to one request at a time. For batch generation, use `voxcpm_no_async_chunk.yaml`.
+Streaming mode is currently limited to one request at a time. For batch generation, use `voxcpm.yaml`.
 
 This matches native VoxCPM more closely: upstream exposes streaming as a
 single-request generator, while its batch CLI runs requests sequentially.
-The script still prints `ttfa`, so you can compare first-audio latency between
-sync and streaming configs directly.
+The script prints `ttfp` and `rtf` for each prompt, and `test.py` writes both
+fields into `summary.json` and `results.json`.
 
 ## Batch Input Formats
 
@@ -175,8 +175,8 @@ This example now matches native VoxCPM batch semantics:
 
 - `--txt-prompts` and `--jsonl-prompts` mean "read many prompts from a file and run them sequentially"
 - the script does not submit multiple prompts together or run concurrent streaming waves
-- `voxcpm.yaml` remains single-request streaming
-- `voxcpm_no_async_chunk.yaml` is the recommended config for batch files
+- `voxcpm_async_chunk.yaml` remains single-request streaming
+- `voxcpm.yaml` is the recommended config for batch files
 
 ## Omni async_chunk vs Qwen3-TTS (same transport, different Stage0 payloads)
 
