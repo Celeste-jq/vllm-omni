@@ -192,9 +192,12 @@ class VoxCPMForConditionalGeneration(nn.Module):
         sample_rate: int,
         out_device: torch.device,
         out_dtype: torch.dtype,
+        hidden_rows: int | None = None,
     ) -> OmniOutput:
+        if hidden_rows is None:
+            hidden_rows = len(infos)
         return OmniOutput(
-            text_hidden_states=torch.zeros((len(infos), 1), device=out_device, dtype=out_dtype),
+            text_hidden_states=torch.zeros((hidden_rows, 1), device=out_device, dtype=out_dtype),
             multimodal_outputs={
                 output_key: [payload_factory() for _ in infos],
                 "sr": [torch.tensor(sample_rate, dtype=torch.int32) for _ in infos],
@@ -209,9 +212,15 @@ class VoxCPMForConditionalGeneration(nn.Module):
         sample_rates: list[torch.Tensor],
         out_device: torch.device,
         out_dtype: torch.dtype,
+        hidden_rows: int | None = None,
     ) -> OmniOutput:
         multimodal_outputs: dict[str, Any] = {output_key: outputs, "sr": sample_rates}
-        if outputs:
+        if hidden_rows is not None:
+            # AR runners index hidden states by scheduled token position. VoxCPM
+            # latent_generator does not produce token-aligned hidden states, so
+            # return a token-aligned placeholder here instead.
+            text_hidden_states = torch.zeros((hidden_rows, 1), device=out_device, dtype=out_dtype)
+        elif outputs:
             outputs_tensor = torch.stack(outputs)
             if outputs_tensor.ndim == 1:
                 text_hidden_states = outputs_tensor.unsqueeze(-1)
@@ -273,6 +282,7 @@ class VoxCPMForConditionalGeneration(nn.Module):
         async_chunk: bool,
         out_device: torch.device,
         out_dtype: torch.dtype,
+        hidden_rows: int,
     ) -> OmniOutput:
         texts = [self._extract_val(info, "text", "") for info in infos]
         if all(not text for text in texts):
@@ -284,6 +294,7 @@ class VoxCPMForConditionalGeneration(nn.Module):
                 sample_rate=sample_rate,
                 out_device=out_device,
                 out_dtype=out_dtype,
+                hidden_rows=hidden_rows,
             )
 
         outputs: list[torch.Tensor] = []
@@ -372,6 +383,7 @@ class VoxCPMForConditionalGeneration(nn.Module):
             sample_rates=sample_rates,
             out_device=out_device,
             out_dtype=out_dtype,
+            hidden_rows=hidden_rows,
         )
 
     def compute_logits(self, hidden_states: torch.Tensor | OmniOutput, sampling_metadata: Any = None) -> torch.Tensor:
@@ -422,6 +434,9 @@ class VoxCPMForConditionalGeneration(nn.Module):
             out_device = input_ids.device
 
         infos = runtime_additional_information or [{}]
+        hidden_rows = len(infos)
+        if input_ids is not None and len(input_ids.shape) > 0:
+            hidden_rows = max(hidden_rows, int(input_ids.shape[0]))
         sample_rate = int(getattr(self._pipeline, "sample_rate", 24000))
         async_chunk = bool(getattr(self.vllm_config.model_config, "async_chunk", False))
         if self.model_stage in self._VAE_STAGES:
@@ -439,6 +454,7 @@ class VoxCPMForConditionalGeneration(nn.Module):
                 async_chunk=async_chunk,
                 out_device=out_device,
                 out_dtype=out_dtype,
+                hidden_rows=hidden_rows,
             )
         raise ValueError(f"Unsupported VoxCPM model_stage at runtime: {self.model_stage}")
 
