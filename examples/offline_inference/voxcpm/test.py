@@ -1,6 +1,6 @@
-"""Run a fixed VoxCPM offline-example test matrix.
+"""Run a fixed VoxCPM offline test matrix.
 
-This script reuses ``end2end.py`` and covers both stage-config routes:
+This script reuses ``advanced_runner.py`` and covers both stage-config routes:
 - streaming: ``voxcpm_async_chunk.yaml``
 - sync: ``voxcpm.yaml``
 
@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-END2END_SCRIPT = Path(__file__).with_name("end2end.py")
+END2END_SCRIPT = Path(__file__).with_name("advanced_runner.py")
 DEFAULT_STAGE_ASYNC = REPO_ROOT / "vllm_omni" / "model_executor" / "stage_configs" / "voxcpm_async_chunk.yaml"
 DEFAULT_STAGE_SYNC = REPO_ROOT / "vllm_omni" / "model_executor" / "stage_configs" / "voxcpm.yaml"
 
@@ -113,7 +113,7 @@ def parse_args() -> argparse.Namespace:
         "--python",
         type=str,
         default=sys.executable,
-        help="Python executable used to launch end2end.py.",
+        help="Python executable used to launch advanced_runner.py.",
     )
     parser.add_argument(
         "--output-root",
@@ -125,48 +125,48 @@ def parse_args() -> argparse.Namespace:
         "--num-runs",
         type=int,
         default=1,
-        help="Forwarded to end2end.py for each case. Default 1.",
+        help="Forwarded to advanced_runner.py for each case. Default 1.",
     )
     parser.add_argument(
         "--cfg-value",
         type=float,
         default=None,
-        help="Optional cfg override forwarded to end2end.py.",
+        help="Optional cfg override forwarded to advanced_runner.py.",
     )
     parser.add_argument(
         "--inference-timesteps",
         type=int,
         default=None,
-        help="Optional inference-timesteps override forwarded to end2end.py.",
+        help="Optional inference-timesteps override forwarded to advanced_runner.py.",
     )
     parser.add_argument(
         "--min-len",
         type=int,
         default=None,
-        help="Optional min-len override forwarded to end2end.py.",
+        help="Optional min-len override forwarded to advanced_runner.py.",
     )
     parser.add_argument(
         "--max-new-tokens",
         type=int,
         default=None,
-        help="Optional max-new-tokens override forwarded to end2end.py.",
+        help="Optional max-new-tokens override forwarded to advanced_runner.py.",
     )
     parser.add_argument(
         "--streaming-prefix-len",
         type=int,
         default=None,
-        help="Optional streaming-prefix-len override forwarded to end2end.py.",
+        help="Optional streaming-prefix-len override forwarded to advanced_runner.py.",
     )
     parser.add_argument(
         "--stage-init-timeout",
         type=int,
         default=600,
-        help="Stage initialization timeout forwarded to end2end.py.",
+        help="Stage initialization timeout forwarded to advanced_runner.py.",
     )
     parser.add_argument(
         "--enable-profiler",
         action="store_true",
-        help="Enable profiler for each case. end2end.py will generate a temporary profiled stage config automatically.",
+        help="Enable profiler for each case. advanced_runner.py will generate a temporary profiled stage config automatically.",
     )
     parser.add_argument(
         "--profiler-dir",
