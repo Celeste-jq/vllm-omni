@@ -12,6 +12,7 @@ def _ensure_module(name: str, module: types.ModuleType) -> None:
 
 def _load_utils_module():
     repo_root = Path(__file__).resolve().parents[4]
+    voxcpm_dir = repo_root / "vllm_omni" / "model_executor" / "models" / "voxcpm"
     utils_path = repo_root / "vllm_omni" / "model_executor" / "models" / "voxcpm" / "utils.py"
 
     fake_numpy = types.ModuleType("numpy")
@@ -66,7 +67,7 @@ def _load_utils_module():
     _ensure_module("vllm_omni.model_executor.models", models_pkg)
 
     voxcpm_pkg = types.ModuleType("vllm_omni.model_executor.models.voxcpm")
-    voxcpm_pkg.__path__ = []  # type: ignore[attr-defined]
+    voxcpm_pkg.__path__ = [str(voxcpm_dir)]  # type: ignore[attr-defined]
     _ensure_module("vllm_omni.model_executor.models.voxcpm", voxcpm_pkg)
 
     stage_wrappers = types.ModuleType("vllm_omni.model_executor.models.voxcpm.voxcpm_stage_wrappers")
@@ -117,6 +118,9 @@ class VoxCPMUtilsModuleTest(unittest.TestCase):
 
         sentinel = {"prompt_text": "hi", "audio_feat": "ok"}
         module._build_prompt_cache_with_soundfile = lambda *_args, **_kwargs: sentinel
+        sys.modules[
+            "vllm_omni.model_executor.models.voxcpm.voxcpm_import_utils"
+        ]._build_prompt_cache_with_soundfile = lambda *_args, **_kwargs: sentinel
 
         result = wrapped.build_prompt_cache(prompt_text="hi", prompt_wav_path="/tmp/a.wav")
 

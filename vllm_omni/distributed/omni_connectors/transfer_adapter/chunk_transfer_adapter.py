@@ -228,8 +228,6 @@ class OmniChunkTransferAdapter(OmniTransferAdapterBase):
                 logger.error(f"Failed to use custom_process_input_func for payload extraction: {e}")
 
         if not payload_data:
-            if is_finished:
-                self.cleanup(request.request_id, getattr(request, "external_req_id", None))
             return
 
         success, size, metadata = self.connector.put(
