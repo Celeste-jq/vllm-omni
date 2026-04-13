@@ -85,10 +85,14 @@ async def _run_streaming(args) -> Path:
     )
     try:
         async for stage_output in omni.generate(prompt, request_id=request_id):
-            request_output = getattr(stage_output, "request_output", None)
-            if request_output is None or not getattr(request_output, "outputs", None):
-                continue
-            mm = getattr(request_output.outputs[0], "multimodal_output", None)
+            mm = getattr(stage_output, "multimodal_output", None)
+            if not isinstance(mm, dict):
+                request_output = getattr(stage_output, "request_output", None)
+                if request_output is None:
+                    continue
+                mm = getattr(request_output, "multimodal_output", None)
+                if not isinstance(mm, dict) and getattr(request_output, "outputs", None):
+                    mm = getattr(request_output.outputs[0], "multimodal_output", None)
             if not isinstance(mm, dict):
                 continue
             audio = _extract_audio_tensor(mm)

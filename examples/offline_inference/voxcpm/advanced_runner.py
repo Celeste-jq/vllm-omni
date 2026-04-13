@@ -446,11 +446,15 @@ async def _collect_streaming_audio(
         print(f"---prompt---:{prompt}")
 
     async for stage_output in omni.generate(prompt, request_id=request_id):
-        ro = stage_output.request_output
-        seq = ro.outputs[0] if hasattr(ro, "outputs") and ro.outputs else None
-        if seq is None:
-            continue
-        mm = seq.multimodal_output
+        mm = getattr(stage_output, "multimodal_output", None)
+        if not isinstance(mm, dict):
+            ro = getattr(stage_output, "request_output", None)
+            if ro is None:
+                continue
+            mm = getattr(ro, "multimodal_output", None)
+            if not isinstance(mm, dict) and getattr(ro, "outputs", None):
+                seq = ro.outputs[0]
+                mm = getattr(seq, "multimodal_output", None)
         if not isinstance(mm, dict):
             continue
         sample_rate = _extract_sample_rate(mm)
