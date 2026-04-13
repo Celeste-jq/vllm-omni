@@ -1,26 +1,13 @@
 from __future__ import annotations
 
-import os
 from typing import Any
 
 import torch
-from vllm.logger import init_logger
 from vllm.inputs import TextPrompt
 
 from vllm_omni.inputs.data import OmniTokensPrompt
 
-logger = init_logger(__name__)
 _VOXCPM_LATENT_MAGIC = 131071
-
-
-def _debug_enabled() -> bool:
-    return os.environ.get("VLLM_OMNI_VOXCPM_DEBUG", "").strip().lower() in {"1", "true", "yes", "on"}
-
-
-def _shape_desc(value: Any) -> str:
-    if isinstance(value, torch.Tensor):
-        return f"tensor(shape={tuple(value.shape)}, dtype={value.dtype}, device={value.device})"
-    return type(value).__name__
 
 
 def _serialize_latent_to_codes(latent: Any) -> list[int]:
@@ -110,20 +97,10 @@ def latent2vae_async_chunk(
     """Stage-0 latent → stage-1 VAE under ``async_chunk`` (connector payload)."""
     # Kept for callback signature compatibility with OmniChunkTransferAdapter.
     _ = transfer_manager
-    req_id = getattr(request, "request_id", None)
-    external_req_id = getattr(request, "external_req_id", None)
     finished_request = _coerce_finished_flag(is_finished)
     if callable(getattr(request, "is_finished", None)):
         finished_request = finished_request or _coerce_finished_flag(request.is_finished())
     if not isinstance(pooling_output, dict):
-        if _debug_enabled():
-            logger.warning(
-                "[VoxCPM][async_chunk][producer] req=%s ext=%s pooling_output=%s finished=%s",
-                req_id,
-                external_req_id,
-                type(pooling_output).__name__,
-                finished_request,
-            )
         if finished_request:
             return {
                 "code_predictor_codes": [0],
@@ -136,14 +113,6 @@ def latent2vae_async_chunk(
         latent = None
 
     if latent is None:
-        if _debug_enabled():
-            logger.warning(
-                "[VoxCPM][async_chunk][producer] req=%s ext=%s missing latent keys=%s finished=%s",
-                req_id,
-                external_req_id,
-                sorted(pooling_output.keys()),
-                finished_request,
-            )
         if finished_request:
             return {
                 "code_predictor_codes": [0],
@@ -157,15 +126,4 @@ def latent2vae_async_chunk(
         "code_predictor_codes": serialized_codes,
         "finished": finished_request,
     }
-    if _debug_enabled():
-        logger.warning(
-            "[VoxCPM][async_chunk][producer] req=%s ext=%s emit keys=%s codes_len=%s latent=%s sr=%s finished=%s",
-            req_id,
-            external_req_id,
-            sorted(out.keys()),
-            len(serialized_codes),
-            _shape_desc(latent),
-            _shape_desc(sr),
-            finished_request,
-        )
     return out

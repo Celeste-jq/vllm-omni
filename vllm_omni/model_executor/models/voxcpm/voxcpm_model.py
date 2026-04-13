@@ -27,10 +27,6 @@ logger = init_logger(__name__)
 _VOXCPM_LATENT_MAGIC = 131071
 
 
-def _debug_enabled() -> bool:
-    return os.environ.get("VLLM_OMNI_VOXCPM_DEBUG", "").strip().lower() in {"1", "true", "yes", "on"}
-
-
 class VoxCPMForConditionalGeneration(nn.Module):
     input_modalities = "audio"
     _LATENT_STAGES = {"latent_generator", "latent", "ar_dit"}
@@ -102,18 +98,6 @@ class VoxCPMForConditionalGeneration(nn.Module):
             return value[0] if value else default
         return value
 
-    @staticmethod
-    def _debug_shape_desc(value: Any) -> str:
-        if isinstance(value, torch.Tensor):
-            return f"tensor(shape={tuple(value.shape)}, dtype={value.dtype}, device={value.device})"
-        if isinstance(value, list):
-            return f"list(len={len(value)})"
-        return type(value).__name__
-
-    @classmethod
-    def _debug_info_summary(cls, info: dict[str, Any]) -> dict[str, str]:
-        return {key: cls._debug_shape_desc(value) for key, value in info.items()}
-
     def _recover_latent_from_input_ids(self, input_ids: torch.Tensor | None) -> torch.Tensor | None:
         if input_ids is None or input_ids.numel() == 0:
             return None
@@ -134,11 +118,6 @@ class VoxCPMForConditionalGeneration(nn.Module):
             )
         packed = payload.to(dtype=torch.int32).to(torch.uint16)
         latent = packed.view(torch.bfloat16).to(torch.float32).reshape(1, latent_dim, time_dim)
-        if _debug_enabled():
-            logger.warning(
-                "[VoxCPM][async_chunk][vae] recovered latent from input_ids=%s",
-                self._debug_shape_desc(latent),
-            )
         return latent
 
     def _maybe_recover_vae_infos(
@@ -304,11 +283,6 @@ class VoxCPMForConditionalGeneration(nn.Module):
         out_dtype: torch.dtype,
     ) -> OmniOutput:
         if all(self._extract_val(info, "latent_audio_feat", None) is None for info in infos):
-            if _debug_enabled():
-                logger.warning(
-                    "[VoxCPM][async_chunk][vae] missing latent for batch infos=%s",
-                    [self._debug_info_summary(info) for info in infos],
-                )
             self._ar_emit_stop_token = True
             return self._make_empty_output(
                 output_key="model_outputs",
@@ -323,13 +297,6 @@ class VoxCPMForConditionalGeneration(nn.Module):
         sample_rates: list[torch.Tensor] = []
         for info in infos:
             latent_audio_feat = self._extract_val(info, "latent_audio_feat", None)
-            if _debug_enabled():
-                logger.warning(
-                    "[VoxCPM][async_chunk][vae] decode info=%s latent=%s async_chunk=%s",
-                    self._debug_info_summary(info),
-                    self._debug_shape_desc(latent_audio_feat),
-                    async_chunk,
-                )
             audio_tensor = self._pipeline.decode(
                 latent_audio_feat,
                 trim_streaming_patch=async_chunk,
@@ -414,13 +381,6 @@ class VoxCPMForConditionalGeneration(nn.Module):
                 else:
                     if is_last:
                         self._latent_stream_gens.pop(request_key, None)
-                    if _debug_enabled():
-                        logger.warning(
-                            "[VoxCPM][async_chunk][latent] req=%s chunk=%s is_last=%s",
-                            request_key,
-                            self._debug_shape_desc(chunk_latent),
-                            bool(is_last),
-                        )
                     outputs.append(chunk_latent.detach().float().cpu())
                     assert last_chunk_flags is not None
                     last_chunk_flags.append(bool(is_last))
