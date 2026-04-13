@@ -113,7 +113,13 @@ def _emit_offline_metrics(
 def _save_wav(mm: dict[str, Any], output_dir: Path, request_id: str) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
     output_path = output_dir / f"output_{request_id}.wav"
-    sf.write(output_path, _extract_audio_tensor(mm).numpy(), _extract_sample_rate(mm), format="WAV")
+    sf.write(
+        output_path,
+        _extract_audio_tensor(mm).float().cpu().clamp(-1.0, 1.0).numpy(),
+        _extract_sample_rate(mm),
+        format="WAV",
+        subtype="PCM_16",
+    )
     return output_path
 
 
@@ -518,7 +524,13 @@ async def _run_streaming_single(
         print_prompt=(run_index == 0 and prompt_index == 0),
     )
     output_path = output_dir / f"output_run{run_index + 1}_{spec.label}.wav"
-    sf.write(output_path, audio_cat.numpy(), sample_rate, format="WAV")
+    sf.write(
+        output_path,
+        audio_cat.float().cpu().clamp(-1.0, 1.0).numpy(),
+        sample_rate,
+        format="WAV",
+        subtype="PCM_16",
+    )
     audio_duration_s = float(audio_cat.numel()) / float(sample_rate) if sample_rate > 0 else 0.0
     ttfp_text = f", ttfp={first_audio_elapsed:.2f}s" if first_audio_elapsed is not None else ""
     rtf_text = f", rtf={elapsed / audio_duration_s:.3f}" if audio_duration_s > 0 else ""

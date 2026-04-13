@@ -65,7 +65,13 @@ def _is_streaming_stage_config(stage_config_path: str) -> bool:
 def _save_audio(audio: torch.Tensor, sample_rate: int, output_dir: Path, request_id: str) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
     output_path = output_dir / f"output_{request_id}.wav"
-    sf.write(output_path, audio.numpy(), sample_rate, format="WAV")
+    sf.write(
+        output_path,
+        audio.float().cpu().clamp(-1.0, 1.0).numpy(),
+        sample_rate,
+        format="WAV",
+        subtype="PCM_16",
+    )
     return output_path
 
 
