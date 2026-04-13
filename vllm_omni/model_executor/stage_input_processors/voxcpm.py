@@ -10,6 +10,7 @@ from vllm.inputs import TextPrompt
 from vllm_omni.inputs.data import OmniTokensPrompt
 
 logger = init_logger(__name__)
+_VOXCPM_LATENT_MAGIC = 131071
 
 
 def _debug_enabled() -> bool:
@@ -20,6 +21,20 @@ def _shape_desc(value: Any) -> str:
     if isinstance(value, torch.Tensor):
         return f"tensor(shape={tuple(value.shape)}, dtype={value.dtype}, device={value.device})"
     return type(value).__name__
+
+
+def _serialize_latent_to_codes(latent: Any) -> list[int]:
+    latent_tensor = latent if isinstance(latent, torch.Tensor) else torch.as_tensor(latent)
+    latent_tensor = latent_tensor.detach().cpu().contiguous()
+    if latent_tensor.ndim == 3:
+        if latent_tensor.shape[0] != 1:
+            raise ValueError(f"Expected batch=1 latent tensor, got shape={tuple(latent_tensor.shape)}")
+        latent_tensor = latent_tensor.squeeze(0)
+    if latent_tensor.ndim != 2:
+        raise ValueError(f"Unsupported latent_audio_feat shape for async chunk: {tuple(latent_tensor.shape)}")
+    latent_dim, time_dim = int(latent_tensor.shape[0]), int(latent_tensor.shape[1])
+    packed = latent_tensor.to(torch.bfloat16).contiguous().view(torch.uint16).reshape(-1).to(torch.int32)
+    return [_VOXCPM_LATENT_MAGIC, latent_dim, time_dim, *packed.tolist()]
 
 
 def _coerce_finished_flag(value: Any) -> bool:
@@ -137,21 +152,20 @@ def latent2vae_async_chunk(
         return None
 
     sr = pooling_output.get("sr")
+    serialized_codes = _serialize_latent_to_codes(latent)
     out: dict[str, Any] = {
-        "code_predictor_codes": [0],
-        "latent_audio_feat": latent.detach().cpu().contiguous() if isinstance(latent, torch.Tensor) else latent,
+        "code_predictor_codes": serialized_codes,
         "finished": finished_request,
     }
-    if isinstance(sr, torch.Tensor):
-        out["sr"] = sr.detach().cpu().contiguous()
     if _debug_enabled():
         logger.warning(
-            "[VoxCPM][async_chunk][producer] req=%s ext=%s emit keys=%s latent=%s sr=%s finished=%s",
+            "[VoxCPM][async_chunk][producer] req=%s ext=%s emit keys=%s codes_len=%s latent=%s sr=%s finished=%s",
             req_id,
             external_req_id,
             sorted(out.keys()),
-            _shape_desc(out.get("latent_audio_feat")),
-            _shape_desc(out.get("sr")),
+            len(serialized_codes),
+            _shape_desc(latent),
+            _shape_desc(sr),
             finished_request,
         )
     return out
