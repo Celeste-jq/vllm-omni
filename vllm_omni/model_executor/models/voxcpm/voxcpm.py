@@ -6,9 +6,9 @@ import sys
 import tempfile
 import warnings
 import wave
-from collections.abc import Generator, Iterable
+from collections.abc import Callable, Generator, Iterable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import numpy as np
 import torch
@@ -246,14 +246,12 @@ def _make_voxcpm_model_for_omni(base: type[Any]) -> type[Any]:
             )
             text_token = torch.cat([text_token, text_pad_token])
             audio_feat = torch.cat([audio_pad_feat, prompt_audio_feat], dim=0)
-            text_mask = torch.cat([torch.ones(text_length), torch.zeros(audio_length)]).type(torch.int32).to(
-                text_token.device
+            text_mask = (
+                torch.cat([torch.ones(text_length), torch.zeros(audio_length)]).type(torch.int32).to(text_token.device)
             )
-            audio_mask = torch.cat([torch.zeros(text_length), torch.ones(audio_length)]).type(torch.int32).to(
-                text_token.device
+            audio_mask = (
+                torch.cat([torch.zeros(text_length), torch.ones(audio_length)]).type(torch.int32).to(text_token.device)
             )
-
-            from voxcpm.model.utils import get_dtype
 
             text_token = text_token.unsqueeze(0).to(self.device)
             text_mask = text_mask.unsqueeze(0).to(self.device)
@@ -593,7 +591,9 @@ class VoxCPMForConditionalGeneration(nn.Module):
         elif outputs:
             outputs_tensor = torch.stack(outputs)
             text_hidden_states = (
-                outputs_tensor.unsqueeze(-1) if outputs_tensor.ndim == 1 else outputs_tensor.reshape(-1, outputs_tensor.shape[-1])
+                outputs_tensor.unsqueeze(-1)
+                if outputs_tensor.ndim == 1
+                else outputs_tensor.reshape(-1, outputs_tensor.shape[-1])
             )
         else:
             text_hidden_states = torch.zeros((0, 1), device=out_device, dtype=out_dtype)

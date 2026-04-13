@@ -210,7 +210,12 @@ def parse_args():
     parser.add_argument("--python", type=str, default=sys.executable, help="Python executable used to launch cases.")
     parser.add_argument("--stage-init-timeout", type=int, default=600, help="Stage initialization timeout in seconds.")
     parser.add_argument("--log-stats", dest="log_stats", action="store_true", help="Enable vLLM Omni stats logging.")
-    parser.add_argument("--no-log-stats", dest="log_stats", action="store_false", help="Disable vLLM Omni stats logging.")
+    parser.add_argument(
+        "--no-log-stats",
+        dest="log_stats",
+        action="store_false",
+        help="Disable vLLM Omni stats logging.",
+    )
     parser.set_defaults(log_stats=True)
     parser.add_argument("--num-runs", type=int, default=1, help="Number of measured runs per case.")
     parser.add_argument("--cfg-value", type=float, default=2.0, help="Classifier-free guidance value for VoxCPM.")

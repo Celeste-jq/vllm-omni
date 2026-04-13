@@ -45,7 +45,9 @@ def _require_soundfile():
     try:
         import soundfile as sf  # type: ignore
     except ModuleNotFoundError as exc:
-        raise RuntimeError("soundfile is required to write VoxCPM benchmark WAV outputs. Install it with: pip install soundfile") from exc
+        raise RuntimeError(
+            "soundfile is required to write VoxCPM benchmark WAV outputs. Install it with: pip install soundfile"
+        ) from exc
     return sf
 
 
@@ -316,19 +318,29 @@ def parse_args():
         "--jsonl-prompts",
         type=str,
         default=None,
-        help="Path to a .jsonl file. Each line must contain at least {'text': ...}; clone rows can also set ref_audio/ref_text, and ref_text must be the real transcript of ref_audio.",
+        help=(
+            "Path to a .jsonl file. Each line must contain at least {'text': ...}; "
+            "clone rows can also set ref_audio/ref_text, and ref_text must be the "
+            "real transcript of ref_audio."
+        ),
     )
     parser.add_argument(
         "--ref-audio",
         type=str,
         default=None,
-        help="Optional reference audio path for voice cloning. With --txt-prompts, the same reference is applied to every line.",
+        help=(
+            "Optional reference audio path for voice cloning. With --txt-prompts, "
+            "the same reference is applied to every line."
+        ),
     )
     parser.add_argument(
         "--ref-text",
         type=str,
         default=None,
-        help="Real transcript of the reference audio. Placeholder text or mismatched text will usually produce noisy/electronic clone audio.",
+        help=(
+            "Real transcript of the reference audio. Placeholder text or mismatched "
+            "text will usually produce noisy/electronic clone audio."
+        ),
     )
     parser.add_argument(
         "--stage-configs-path",
@@ -401,12 +413,18 @@ def parse_args():
         "--warmup-runs",
         type=int,
         default=0,
-        help="Optional number of warmup passes before measured runs. Warmup uses only the first prompt and does not save outputs.",
+        help=(
+            "Optional number of warmup passes before measured runs. Warmup uses only "
+            "the first prompt and does not save outputs."
+        ),
     )
     parser.add_argument(
         "--enable-profiler",
         action="store_true",
-        help="Enable torch profiler for the configured stages. A temporary profiled stage config is generated automatically.",
+        help=(
+            "Enable torch profiler for the configured stages. A temporary profiled "
+            "stage config is generated automatically."
+        ),
     )
     parser.add_argument(
         "--profiler-dir",
@@ -763,11 +781,13 @@ def _run_sync(args) -> list[Path]:
             t_run = time.perf_counter()
             run_paths: list[Path] = []
             for prompt_index, spec in enumerate(prompt_specs):
-                prompt_paths, _, first_audio_elapsed, elapsed_s, audio_duration_s, metrics_request_id = _run_sync_single(
-                    spec,
-                    request_prefix=f"sync_run{run + 1}_{prompt_index + 1:03d}",
-                    save_outputs=True,
-                    run_index=run,
+                prompt_paths, _, first_audio_elapsed, elapsed_s, audio_duration_s, metrics_request_id = (
+                    _run_sync_single(
+                        spec,
+                        request_prefix=f"sync_run{run + 1}_{prompt_index + 1:03d}",
+                        save_outputs=True,
+                        run_index=run,
+                    )
                 )
                 run_paths.extend(prompt_paths)
                 ttfp_text = f", ttfp={first_audio_elapsed:.2f}s" if first_audio_elapsed is not None else ""

@@ -167,10 +167,7 @@ def parse_args():
         "--stage-configs-path",
         type=str,
         default=str(DEFAULT_SYNC_STAGE_CONFIG),
-        help=(
-            "Stage config path. Use voxcpm.yaml for non-streaming or "
-            "voxcpm_async_chunk.yaml for streaming."
-        ),
+        help=("Stage config path. Use voxcpm.yaml for non-streaming or voxcpm_async_chunk.yaml for streaming."),
     )
     parser.add_argument("--text", type=str, required=True, help="Input text for synthesis.")
     parser.add_argument("--ref-audio", type=str, default=None, help="Reference audio path for voice cloning.")

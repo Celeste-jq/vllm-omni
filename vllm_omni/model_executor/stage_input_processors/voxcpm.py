@@ -120,7 +120,6 @@ def latent2vae_async_chunk(
             }
         return None
 
-    sr = pooling_output.get("sr")
     serialized_codes = _serialize_latent_to_codes(latent)
     out: dict[str, Any] = {
         "code_predictor_codes": serialized_codes,
