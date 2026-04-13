@@ -1,5 +1,8 @@
 import argparse
 import dataclasses
+import json
+import os
+import tempfile
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -11,6 +14,16 @@ from vllm_omni.engine.output_modality import OutputModality
 from vllm_omni.plugins import load_omni_general_plugins
 
 logger = init_logger(__name__)
+
+
+_ARCH_TO_MODEL_TYPE = {
+    "CosyVoice3Model": "cosyvoice3",
+    "VoxCPMForConditionalGeneration": "voxcpm",
+}
+
+_TOKENIZER_SUBFOLDER_MAP = {
+    "CosyVoice3Model": "CosyVoice-BlankEN",
+}
 
 def _register_omni_hf_configs() -> None:
     try:
