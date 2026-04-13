@@ -181,17 +181,25 @@ def _emit_offline_metrics(
     print(f"[OfflineMetrics] {metrics}")
 
 
-def _save_wav(mm: dict[str, Any], output_dir: Path, request_id: str) -> Path:
+def _write_audio_tensor(output_path: Path, audio_tensor: Any, sample_rate: int) -> None:
     sf = _require_soundfile()
-    output_dir.mkdir(parents=True, exist_ok=True)
-    output_path = output_dir / f"output_{request_id}.wav"
+    if isinstance(audio_tensor, torch.Tensor):
+        audio_np = audio_tensor.float().cpu().clamp(-1.0, 1.0).numpy()
+    else:
+        audio_np = torch.as_tensor(audio_tensor).float().cpu().clamp(-1.0, 1.0).numpy()
     sf.write(
         output_path,
-        _extract_audio_tensor(mm).float().cpu().clamp(-1.0, 1.0).numpy(),
-        _extract_sample_rate(mm),
+        audio_np,
+        sample_rate,
         format="WAV",
         subtype="PCM_16",
     )
+
+
+def _save_wav(mm: dict[str, Any], output_dir: Path, request_id: str) -> Path:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_path = output_dir / f"output_{request_id}.wav"
+    _write_audio_tensor(output_path, _extract_audio_tensor(mm), _extract_sample_rate(mm))
     return output_path
 
 
@@ -385,8 +393,10 @@ def _normalize_request_summaries(
     offline_metrics: dict[str, dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     offline_metrics = offline_metrics or {}
-    normalized: list[dict[str, Any]] = []
+    normalized_by_request_id: dict[str, dict[str, Any]] = {}
     for summary in summary_blocks:
+        if not summary:
+            continue
         overall = summary.get("overall_summary", {})
         request_id = None
         stage_table = summary.get("stage_table", [])
@@ -406,20 +416,41 @@ def _normalize_request_summaries(
 
         e2e_stats = e2e_table[0] if e2e_table and isinstance(e2e_table[0], dict) else {}
         metrics = offline_metrics.get(str(request_id), {})
-        normalized.append(
+        normalized_by_request_id[str(request_id)] = {
+            "request_id": request_id,
+            "stage_wall_time_ms": stage_wall_times,
+            "e2e_total_ms": float(e2e_stats.get("e2e_total_ms", 0.0)),
+            "e2e_total_tokens": int(e2e_stats.get("e2e_total_tokens", 0)),
+            "transfers_total_time_ms": float(e2e_stats.get("transfers_total_time_ms", 0.0)),
+            "transfers_total_kbytes": float(e2e_stats.get("transfers_total_kbytes", 0.0)),
+            "ttfp_ms": float(metrics["ttfp_ms"]) if metrics.get("ttfp_ms") is not None else None,
+            "audio_duration_s": float(metrics.get("audio_duration_s", 0.0)),
+            "rtf": float(metrics["rtf"]) if metrics.get("rtf") is not None else None,
+        }
+
+    for request_id, metrics in offline_metrics.items():
+        item = normalized_by_request_id.setdefault(
+            str(request_id),
             {
-                "request_id": request_id,
-                "stage_wall_time_ms": stage_wall_times,
-                "e2e_total_ms": float(e2e_stats.get("e2e_total_ms", 0.0)),
-                "e2e_total_tokens": int(e2e_stats.get("e2e_total_tokens", 0)),
-                "transfers_total_time_ms": float(e2e_stats.get("transfers_total_time_ms", 0.0)),
-                "transfers_total_kbytes": float(e2e_stats.get("transfers_total_kbytes", 0.0)),
-                "ttfp_ms": float(metrics["ttfp_ms"]) if metrics.get("ttfp_ms") is not None else None,
-                "audio_duration_s": float(metrics.get("audio_duration_s", 0.0)),
-                "rtf": float(metrics["rtf"]) if metrics.get("rtf") is not None else None,
-            }
+                "request_id": str(request_id),
+                "stage_wall_time_ms": {},
+                "e2e_total_ms": 0.0,
+                "e2e_total_tokens": 0,
+                "transfers_total_time_ms": 0.0,
+                "transfers_total_kbytes": 0.0,
+                "ttfp_ms": None,
+                "audio_duration_s": 0.0,
+                "rtf": None,
+            },
         )
-    return normalized
+        if metrics.get("ttfp_ms") is not None:
+            item["ttfp_ms"] = float(metrics["ttfp_ms"])
+        if metrics.get("audio_duration_s") is not None:
+            item["audio_duration_s"] = float(metrics["audio_duration_s"])
+        if metrics.get("rtf") is not None:
+            item["rtf"] = float(metrics["rtf"])
+
+    return list(normalized_by_request_id.values())
 
 
 def _collect_request_summaries_from_log(log_text: str) -> list[dict[str, Any]]:
@@ -431,6 +462,14 @@ def _collect_request_summaries_from_log(log_text: str) -> list[dict[str, Any]]:
         if isinstance(item, dict) and item.get("request_id") is not None
     }
     return _normalize_request_summaries(summary_blocks, metrics_by_request_id)
+
+
+def _extract_stream_finished(stage_output: Any) -> bool:
+    request_output = getattr(stage_output, "request_output", None)
+    request_finished = getattr(request_output, "finished", None)
+    if request_finished is not None:
+        return bool(request_finished)
+    return bool(getattr(stage_output, "finished", False))
 
 
 def _print_request_summaries(request_summaries: list[dict[str, Any]]) -> None:
@@ -801,9 +840,17 @@ def parse_args():
     )
     parser.add_argument(
         "--log-stats",
+        dest="log_stats",
         action="store_true",
         help="Enable vLLM Omni stats logging.",
     )
+    parser.add_argument(
+        "--no-log-stats",
+        dest="log_stats",
+        action="store_false",
+        help="Disable vLLM Omni stats logging.",
+    )
+    parser.set_defaults(log_stats=True)
     parser.add_argument(
         "--num-runs",
         type=int,
@@ -937,11 +984,11 @@ async def _collect_streaming_audio(
                 chunk_i,
                 int(delta.numel()),
                 n,
-                stage_output.finished,
+                _extract_stream_finished(stage_output),
             )
             chunk_i += 1
         except ValueError:
-            if not stage_output.finished:
+            if not _extract_stream_finished(stage_output):
                 logger.debug("skip non-audio partial output chunk=%d", chunk_i)
 
     if not delta_chunks:
@@ -975,13 +1022,7 @@ async def _run_streaming_single(
         print_prompt=(run_index == 0 and prompt_index == 0),
     )
     output_path = output_dir / f"output_run{run_index + 1}_{spec.label}.wav"
-    sf.write(
-        output_path,
-        audio_cat.float().cpu().clamp(-1.0, 1.0).numpy(),
-        sample_rate,
-        format="WAV",
-        subtype="PCM_16",
-    )
+    _write_audio_tensor(output_path, audio_cat, sample_rate)
     audio_duration_s = float(audio_cat.numel()) / float(sample_rate) if sample_rate > 0 else 0.0
     ttfp_text = f", ttfp={first_audio_elapsed:.2f}s" if first_audio_elapsed is not None else ""
     rtf_text = f", rtf={elapsed / audio_duration_s:.3f}" if audio_duration_s > 0 else ""
