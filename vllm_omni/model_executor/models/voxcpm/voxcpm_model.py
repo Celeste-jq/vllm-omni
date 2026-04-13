@@ -24,6 +24,7 @@ from .utils import (
 )
 
 logger = init_logger(__name__)
+_VOXCPM_LATENT_MAGIC = 131071
 
 
 class VoxCPMForConditionalGeneration(nn.Module):
@@ -96,6 +97,44 @@ class VoxCPMForConditionalGeneration(nn.Module):
         if isinstance(value, list):
             return value[0] if value else default
         return value
+
+    def _recover_latent_from_input_ids(self, input_ids: torch.Tensor | None) -> torch.Tensor | None:
+        if input_ids is None or input_ids.numel() == 0:
+            return None
+        flat_ids = input_ids.detach().reshape(-1).to("cpu")
+        if flat_ids.numel() < 4 or int(flat_ids[0].item()) != _VOXCPM_LATENT_MAGIC:
+            return None
+        latent_dim = int(flat_ids[1].item())
+        time_dim = int(flat_ids[2].item())
+        payload = flat_ids[3:]
+        expected = latent_dim * time_dim
+        if latent_dim <= 0 or time_dim <= 0:
+            raise ValueError(f"Invalid VoxCPM latent header: latent_dim={latent_dim}, time_dim={time_dim}")
+        if int(payload.numel()) != expected:
+            raise ValueError(
+                "Invalid VoxCPM latent payload size: "
+                f"expected={expected}, actual={int(payload.numel())}, "
+                f"latent_dim={latent_dim}, time_dim={time_dim}"
+            )
+        packed = payload.to(dtype=torch.int32).to(torch.uint16)
+        latent = packed.view(torch.bfloat16).to(torch.float32).reshape(1, latent_dim, time_dim)
+        return latent
+
+    def _maybe_recover_vae_infos(
+        self,
+        infos: list[dict[str, Any]],
+        input_ids: torch.Tensor | None,
+        *,
+        async_chunk: bool,
+    ) -> list[dict[str, Any]]:
+        if not async_chunk:
+            return infos
+        if any(self._extract_val(info, "latent_audio_feat", None) is not None for info in infos):
+            return infos
+        recovered = self._recover_latent_from_input_ids(input_ids)
+        if recovered is None:
+            return infos
+        return [{"latent_audio_feat": recovered}]
 
     @staticmethod
     def _normalize_audio_samples(samples: Any) -> np.ndarray:
@@ -440,6 +479,7 @@ class VoxCPMForConditionalGeneration(nn.Module):
         sample_rate = int(getattr(self._pipeline, "sample_rate", 24000))
         async_chunk = bool(getattr(self.vllm_config.model_config, "async_chunk", False))
         if self.model_stage in self._VAE_STAGES:
+            infos = self._maybe_recover_vae_infos(infos, input_ids, async_chunk=async_chunk)
             return self._forward_vae_stage(
                 infos,
                 sample_rate=sample_rate,

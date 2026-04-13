@@ -7,6 +7,22 @@ from vllm.inputs import TextPrompt
 
 from vllm_omni.inputs.data import OmniTokensPrompt
 
+_VOXCPM_LATENT_MAGIC = 131071
+
+
+def _serialize_latent_to_codes(latent: Any) -> list[int]:
+    latent_tensor = latent if isinstance(latent, torch.Tensor) else torch.as_tensor(latent)
+    latent_tensor = latent_tensor.detach().cpu().contiguous()
+    if latent_tensor.ndim == 3:
+        if latent_tensor.shape[0] != 1:
+            raise ValueError(f"Expected batch=1 latent tensor, got shape={tuple(latent_tensor.shape)}")
+        latent_tensor = latent_tensor.squeeze(0)
+    if latent_tensor.ndim != 2:
+        raise ValueError(f"Unsupported latent_audio_feat shape for async chunk: {tuple(latent_tensor.shape)}")
+    latent_dim, time_dim = int(latent_tensor.shape[0]), int(latent_tensor.shape[1])
+    packed = latent_tensor.to(torch.bfloat16).contiguous().view(torch.uint16).reshape(-1).to(torch.int32)
+    return [_VOXCPM_LATENT_MAGIC, latent_dim, time_dim, *packed.tolist()]
+
 
 def _coerce_finished_flag(value: Any) -> bool:
     """Normalize VoxCPM async-chunk finished markers to a Python bool."""
@@ -105,11 +121,9 @@ def latent2vae_async_chunk(
         return None
 
     sr = pooling_output.get("sr")
+    serialized_codes = _serialize_latent_to_codes(latent)
     out: dict[str, Any] = {
-        "code_predictor_codes": [0],
-        "latent_audio_feat": latent.detach().cpu().contiguous() if isinstance(latent, torch.Tensor) else latent,
+        "code_predictor_codes": serialized_codes,
         "finished": finished_request,
     }
-    if isinstance(sr, torch.Tensor):
-        out["sr"] = sr.detach().cpu().contiguous()
     return out

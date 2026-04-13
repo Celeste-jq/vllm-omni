@@ -65,7 +65,13 @@ def _is_streaming_stage_config(stage_config_path: str) -> bool:
 def _save_audio(audio: torch.Tensor, sample_rate: int, output_dir: Path, request_id: str) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
     output_path = output_dir / f"output_{request_id}.wav"
-    sf.write(output_path, audio.numpy(), sample_rate, format="WAV")
+    sf.write(
+        output_path,
+        audio.float().cpu().clamp(-1.0, 1.0).numpy(),
+        sample_rate,
+        format="WAV",
+        subtype="PCM_16",
+    )
     return output_path
 
 
@@ -85,10 +91,14 @@ async def _run_streaming(args) -> Path:
     )
     try:
         async for stage_output in omni.generate(prompt, request_id=request_id):
-            request_output = getattr(stage_output, "request_output", None)
-            if request_output is None or not getattr(request_output, "outputs", None):
-                continue
-            mm = getattr(request_output.outputs[0], "multimodal_output", None)
+            mm = getattr(stage_output, "multimodal_output", None)
+            if not isinstance(mm, dict):
+                request_output = getattr(stage_output, "request_output", None)
+                if request_output is None:
+                    continue
+                mm = getattr(request_output, "multimodal_output", None)
+                if not isinstance(mm, dict) and getattr(request_output, "outputs", None):
+                    mm = getattr(request_output.outputs[0], "multimodal_output", None)
             if not isinstance(mm, dict):
                 continue
             audio = _extract_audio_tensor(mm)
