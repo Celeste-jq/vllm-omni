@@ -4,6 +4,7 @@ This directory contains both:
 
 - online serving benchmark through the OpenAI-compatible `/v1/audio/speech` API
 - offline benchmark for `Omni` / `AsyncOmni`
+- full offline smoke-matrix orchestration
 
 Both benchmark paths report:
 
@@ -38,8 +39,7 @@ python benchmarks/voxcpm/vllm_omni/bench_tts_offline.py \
 Full fixed offline matrix, equivalent to the old `examples/offline_inference/voxcpm/test.py`:
 
 ```bash
-python benchmarks/voxcpm/vllm_omni/bench_tts_offline.py \
-    --matrix full \
+python benchmarks/voxcpm/vllm_omni/run_offline_matrix.py \
     --model /path/to/voxcpm-model \
     --ref-audio /path/to/reference.wav \
     --ref-text "The exact transcript spoken in reference.wav." \
@@ -59,6 +59,8 @@ And these six scenarios under each route:
 - warmup + batch voice cloning
 - cold single TTS
 - cold single voice cloning
+
+`bench_tts_offline.py` itself no longer writes `summary.json` / `results.json`; it prints TTFP / RTF inline and saves generated WAV files only. The matrix runner keeps only per-case `run.log`.
 
 ## Start the Server
 

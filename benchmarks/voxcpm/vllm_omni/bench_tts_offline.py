@@ -6,19 +6,14 @@ Supports both:
 - text-only synthesis
 - voice cloning
 - text/clone batch inputs from txt or jsonl
-- fixed smoke matrix equivalent to the old examples/offline_inference/voxcpm/test.py
 """
 
 from __future__ import annotations
 
 import asyncio
-import ast
 import json
 import logging
 import os
-import shlex
-import subprocess
-import sys
 import tempfile
 import time
 import uuid
@@ -32,25 +27,10 @@ from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm_omni import AsyncOmni, Omni
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-BENCH_SCRIPT = Path(__file__).resolve()
 DEFAULT_STAGE_ASYNC = REPO_ROOT / "vllm_omni" / "model_executor" / "stage_configs" / "voxcpm_async_chunk.yaml"
 DEFAULT_STAGE_SYNC = REPO_ROOT / "vllm_omni" / "model_executor" / "stage_configs" / "voxcpm.yaml"
-DEFAULT_MATRIX_OUTPUT_ROOT = BENCH_SCRIPT.parents[1] / "results" / "offline_matrix"
 
 logger = logging.getLogger(__name__)
-
-SINGLE_TTS_TEXT = "This is a single text-to-speech smoke test for VoxCPM on vLLM Omni."
-SINGLE_CLONE_TEXT = "This sentence is synthesized with the cloned voice for validation."
-BATCH_TTS_TEXTS = [
-    "The first batch text-to-speech sample validates sequential batch execution.",
-    "The second batch text-to-speech sample checks another prompt in the same file.",
-    "The third batch text-to-speech sample completes the sequential batch path.",
-]
-BATCH_CLONE_TEXTS = [
-    "The first cloned sample validates sequential batch voice cloning.",
-    "The second cloned sample checks the same reference voice on another prompt.",
-    "The third cloned sample finishes the shared-reference clone batch path.",
-]
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,50 +39,6 @@ class PromptSpec:
     label: str
     ref_audio: str | None = None
     ref_text: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class ModeSpec:
-    name: str
-    stage_config: Path
-
-
-@dataclass(frozen=True, slots=True)
-class CaseSpec:
-    name: str
-    warmup_runs: int
-    prompt_kind: str
-    voice_clone: bool
-
-
-@dataclass(frozen=True, slots=True)
-class CaseResult:
-    mode: str
-    case: str
-    returncode: int
-    elapsed_s: float
-    output_dir: Path
-    log_path: Path
-    request_summaries: list[dict[str, Any]]
-
-    @property
-    def ok(self) -> bool:
-        return self.returncode == 0
-
-
-MODE_SPECS = [
-    ModeSpec(name="streaming", stage_config=DEFAULT_STAGE_ASYNC),
-    ModeSpec(name="sync", stage_config=DEFAULT_STAGE_SYNC),
-]
-
-CASE_SPECS = [
-    CaseSpec(name="warmup_single_tts", warmup_runs=1, prompt_kind="single", voice_clone=False),
-    CaseSpec(name="warmup_single_clone", warmup_runs=1, prompt_kind="single", voice_clone=True),
-    CaseSpec(name="warmup_batch_tts", warmup_runs=1, prompt_kind="batch", voice_clone=False),
-    CaseSpec(name="warmup_batch_clone", warmup_runs=1, prompt_kind="batch", voice_clone=True),
-    CaseSpec(name="cold_single_tts", warmup_runs=0, prompt_kind="single", voice_clone=False),
-    CaseSpec(name="cold_single_clone", warmup_runs=0, prompt_kind="single", voice_clone=True),
-]
 
 
 def _require_soundfile():
@@ -305,390 +241,12 @@ def _get_warmup_specs(prompt_specs: list[PromptSpec]) -> list[PromptSpec]:
     return prompt_specs[:1]
 
 
-def _write_lines(path: Path, lines: list[str]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-
-
-def _prepare_batch_inputs(output_root: Path) -> tuple[Path, Path]:
-    input_dir = output_root / "inputs"
-    batch_tts_path = input_dir / "batch_tts_prompts.txt"
-    batch_clone_path = input_dir / "batch_clone_prompts.txt"
-    _write_lines(batch_tts_path, BATCH_TTS_TEXTS)
-    _write_lines(batch_clone_path, BATCH_CLONE_TEXTS)
-    return batch_tts_path, batch_clone_path
-
-
-def _extract_summary_blocks(log_text: str) -> list[dict[str, Any]]:
-    return _extract_literal_blocks(log_text, "[Summary]")
-
-
-def _extract_offline_metrics_blocks(log_text: str) -> list[dict[str, Any]]:
-    return _extract_literal_blocks(log_text, "[OfflineMetrics]")
-
-
-def _extract_literal_blocks(log_text: str, marker: str) -> list[dict[str, Any]]:
-    results: list[dict[str, Any]] = []
-    cursor = 0
-    while True:
-        marker_idx = log_text.find(marker, cursor)
-        if marker_idx < 0:
-            break
-        brace_idx = log_text.find("{", marker_idx)
-        if brace_idx < 0:
-            break
-
-        depth = 0
-        in_single = False
-        in_double = False
-        escaped = False
-        end_idx: int | None = None
-        for pos in range(brace_idx, len(log_text)):
-            ch = log_text[pos]
-            if escaped:
-                escaped = False
-                continue
-            if ch == "\\":
-                escaped = True
-                continue
-            if in_single:
-                if ch == "'":
-                    in_single = False
-                continue
-            if in_double:
-                if ch == '"':
-                    in_double = False
-                continue
-            if ch == "'":
-                in_single = True
-                continue
-            if ch == '"':
-                in_double = True
-                continue
-            if ch == "{":
-                depth += 1
-            elif ch == "}":
-                depth -= 1
-                if depth == 0:
-                    end_idx = pos + 1
-                    break
-
-        if end_idx is None:
-            break
-
-        block = log_text[brace_idx:end_idx]
-        try:
-            parsed = ast.literal_eval(block)
-        except Exception:
-            cursor = end_idx
-            continue
-        if isinstance(parsed, dict):
-            results.append(parsed)
-        cursor = end_idx
-    return results
-
-
-def _normalize_request_summaries(
-    summary_blocks: list[dict[str, Any]],
-    offline_metrics: dict[str, dict[str, Any]] | None = None,
-) -> list[dict[str, Any]]:
-    offline_metrics = offline_metrics or {}
-    normalized_by_request_id: dict[str, dict[str, Any]] = {}
-    for summary in summary_blocks:
-        if not summary:
-            continue
-        overall = summary.get("overall_summary", {})
-        request_id = None
-        stage_table = summary.get("stage_table", [])
-        e2e_table = summary.get("e2e_table", [])
-        if stage_table and isinstance(stage_table[0], dict):
-            request_id = stage_table[0].get("request_id")
-        if request_id is None and e2e_table and isinstance(e2e_table[0], dict):
-            request_id = e2e_table[0].get("request_id")
-        if request_id is None:
-            request_id = f"request_{len(normalized) + 1:03d}"
-
-        stage_wall_times: dict[str, float] = {}
-        for key, value in overall.items():
-            if key.startswith("e2e_stage_") and key.endswith("_wall_time_ms"):
-                stage_name = key[len("e2e_") : -len("_wall_time_ms")]
-                stage_wall_times[stage_name] = float(value)
-
-        e2e_stats = e2e_table[0] if e2e_table and isinstance(e2e_table[0], dict) else {}
-        metrics = offline_metrics.get(str(request_id), {})
-        normalized_by_request_id[str(request_id)] = {
-            "request_id": request_id,
-            "stage_wall_time_ms": stage_wall_times,
-            "e2e_total_ms": float(e2e_stats.get("e2e_total_ms", 0.0)),
-            "e2e_total_tokens": int(e2e_stats.get("e2e_total_tokens", 0)),
-            "transfers_total_time_ms": float(e2e_stats.get("transfers_total_time_ms", 0.0)),
-            "transfers_total_kbytes": float(e2e_stats.get("transfers_total_kbytes", 0.0)),
-            "ttfp_ms": float(metrics["ttfp_ms"]) if metrics.get("ttfp_ms") is not None else None,
-            "audio_duration_s": float(metrics.get("audio_duration_s", 0.0)),
-            "rtf": float(metrics["rtf"]) if metrics.get("rtf") is not None else None,
-        }
-
-    for request_id, metrics in offline_metrics.items():
-        item = normalized_by_request_id.setdefault(
-            str(request_id),
-            {
-                "request_id": str(request_id),
-                "stage_wall_time_ms": {},
-                "e2e_total_ms": 0.0,
-                "e2e_total_tokens": 0,
-                "transfers_total_time_ms": 0.0,
-                "transfers_total_kbytes": 0.0,
-                "ttfp_ms": None,
-                "audio_duration_s": 0.0,
-                "rtf": None,
-            },
-        )
-        if metrics.get("ttfp_ms") is not None:
-            item["ttfp_ms"] = float(metrics["ttfp_ms"])
-        if metrics.get("audio_duration_s") is not None:
-            item["audio_duration_s"] = float(metrics["audio_duration_s"])
-        if metrics.get("rtf") is not None:
-            item["rtf"] = float(metrics["rtf"])
-
-    return list(normalized_by_request_id.values())
-
-
-def _collect_request_summaries_from_log(log_text: str) -> list[dict[str, Any]]:
-    summary_blocks = _extract_summary_blocks(log_text)
-    metrics_blocks = _extract_offline_metrics_blocks(log_text)
-    metrics_by_request_id = {
-        str(item["request_id"]): item
-        for item in metrics_blocks
-        if isinstance(item, dict) and item.get("request_id") is not None
-    }
-    return _normalize_request_summaries(summary_blocks, metrics_by_request_id)
-
-
 def _extract_stream_finished(stage_output: Any) -> bool:
     request_output = getattr(stage_output, "request_output", None)
     request_finished = getattr(request_output, "finished", None)
     if request_finished is not None:
         return bool(request_finished)
     return bool(getattr(stage_output, "finished", False))
-
-
-def _print_request_summaries(request_summaries: list[dict[str, Any]]) -> None:
-    if not request_summaries:
-        print("No stage timing summary was parsed.")
-        return
-    print("Per-request stage timings:")
-    for item in request_summaries:
-        stage_parts = [
-            f"{stage_name}={stage_ms:.2f}ms" for stage_name, stage_ms in sorted(item["stage_wall_time_ms"].items())
-        ]
-        stage_text = ", ".join(stage_parts) if stage_parts else "no stage data"
-        ttfp_text = f", ttfp={item['ttfp_ms']:.2f}ms" if item.get("ttfp_ms") is not None else ""
-        rtf_text = f", rtf={item['rtf']:.3f}" if item.get("rtf") is not None else ""
-        print(
-            f"- {item['request_id']}: {stage_text}, e2e={item['e2e_total_ms']:.2f}ms, "
-            f"tokens={item['e2e_total_tokens']}{ttfp_text}{rtf_text}"
-        )
-
-
-def _base_matrix_command(args: Any, mode: ModeSpec, output_dir: Path) -> list[str]:
-    cmd = [
-        args.python,
-        str(BENCH_SCRIPT),
-        "--model",
-        args.model,
-        "--stage-configs-path",
-        str(mode.stage_config),
-        "--output-dir",
-        str(output_dir),
-        "--num-runs",
-        str(args.num_runs),
-        "--stage-init-timeout",
-        str(args.stage_init_timeout),
-    ]
-    if args.log_stats:
-        cmd.append("--log-stats")
-    if args.cfg_value is not None:
-        cmd.extend(["--cfg-value", str(args.cfg_value)])
-    if args.inference_timesteps is not None:
-        cmd.extend(["--inference-timesteps", str(args.inference_timesteps)])
-    if args.min_len is not None:
-        cmd.extend(["--min-len", str(args.min_len)])
-    if args.max_new_tokens is not None:
-        cmd.extend(["--max-new-tokens", str(args.max_new_tokens)])
-    if args.streaming_prefix_len is not None:
-        cmd.extend(["--streaming-prefix-len", str(args.streaming_prefix_len)])
-    if args.enable_profiler:
-        profiler_dir = Path(args.profiler_dir) if args.profiler_dir is not None else (output_dir / "profiler")
-        cmd.append("--enable-profiler")
-        cmd.extend(["--profiler-dir", str(profiler_dir)])
-        cmd.extend(["--profiler-wait-seconds", str(args.profiler_wait_seconds)])
-        if args.profiler_stages is not None:
-            cmd.append("--profiler-stages")
-            cmd.extend(str(stage_id) for stage_id in args.profiler_stages)
-    return cmd
-
-
-def _build_matrix_case_command(
-    args: Any,
-    mode: ModeSpec,
-    case: CaseSpec,
-    *,
-    batch_tts_path: Path,
-    batch_clone_path: Path,
-    output_dir: Path,
-) -> list[str]:
-    cmd = _base_matrix_command(args, mode, output_dir)
-    cmd.extend(["--warmup-runs", str(case.warmup_runs)])
-
-    if case.prompt_kind == "single":
-        text = SINGLE_CLONE_TEXT if case.voice_clone else SINGLE_TTS_TEXT
-        cmd.extend(["--text", text])
-    else:
-        prompt_path = batch_clone_path if case.voice_clone else batch_tts_path
-        cmd.extend(["--txt-prompts", str(prompt_path)])
-
-    if case.voice_clone:
-        cmd.extend(["--ref-audio", args.ref_audio, "--ref-text", args.ref_text])
-    return cmd
-
-
-def _run_matrix_case(
-    args: Any,
-    mode: ModeSpec,
-    case: CaseSpec,
-    *,
-    batch_tts_path: Path,
-    batch_clone_path: Path,
-    output_root: Path,
-) -> CaseResult:
-    case_output_dir = output_root / mode.name / case.name
-    case_output_dir.mkdir(parents=True, exist_ok=True)
-    case_log_path = case_output_dir / "run.log"
-    cmd = _build_matrix_case_command(
-        args,
-        mode,
-        case,
-        batch_tts_path=batch_tts_path,
-        batch_clone_path=batch_clone_path,
-        output_dir=case_output_dir,
-    )
-
-    print()
-    print("=" * 80)
-    print(f"[{mode.name}] {case.name}")
-    print(f"Output directory: {case_output_dir}")
-    print(shlex.join(cmd))
-
-    start = time.perf_counter()
-    captured_lines: list[str] = []
-    with case_log_path.open("w", encoding="utf-8") as log_fp:
-        process = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
-        )
-        assert process.stdout is not None
-        for line in process.stdout:
-            print(line, end="")
-            log_fp.write(line)
-            captured_lines.append(line)
-        process.wait()
-
-    elapsed_s = time.perf_counter() - start
-    returncode = int(process.returncode or 0)
-    request_summaries = _collect_request_summaries_from_log("".join(captured_lines))
-    _print_request_summaries(request_summaries)
-    summary_json_path = case_output_dir / "summary.json"
-    summary_json_path.write_text(json.dumps(request_summaries, ensure_ascii=False, indent=2), encoding="utf-8")
-
-    status = "PASS" if returncode == 0 else "FAIL"
-    print(f"[{mode.name}] {case.name} -> {status} ({elapsed_s:.2f}s)")
-    return CaseResult(
-        mode=mode.name,
-        case=case.name,
-        returncode=returncode,
-        elapsed_s=elapsed_s,
-        output_dir=case_output_dir,
-        log_path=case_log_path,
-        request_summaries=request_summaries,
-    )
-
-
-def _run_full_matrix(args: Any) -> int:
-    output_root = Path(args.output_root)
-    output_root.mkdir(parents=True, exist_ok=True)
-    batch_tts_path, batch_clone_path = _prepare_batch_inputs(output_root)
-
-    print(f"Model: {args.model}")
-    print(f"Reference audio: {args.ref_audio}")
-    print(f"Reference text: {args.ref_text}")
-    print(f"Python: {args.python}")
-    print(f"Output root: {output_root}")
-    print(f"Cases: {len(MODE_SPECS) * len(CASE_SPECS)}")
-
-    results: list[CaseResult] = []
-    for mode in MODE_SPECS:
-        for case in CASE_SPECS:
-            results.append(
-                _run_matrix_case(
-                    args,
-                    mode,
-                    case,
-                    batch_tts_path=batch_tts_path,
-                    batch_clone_path=batch_clone_path,
-                    output_root=output_root,
-                )
-            )
-
-    passed = sum(1 for result in results if result.ok)
-    failed = [result for result in results if not result.ok]
-
-    print()
-    print("=" * 80)
-    print("Summary:")
-    for result in results:
-        status = "PASS" if result.ok else f"FAIL({result.returncode})"
-        print(f"- [{result.mode}] {result.case}: {status} ({result.elapsed_s:.2f}s)")
-        for item in result.request_summaries:
-            stage_parts = [
-                f"{stage_name}={stage_ms:.2f}ms" for stage_name, stage_ms in sorted(item["stage_wall_time_ms"].items())
-            ]
-            stage_text = ", ".join(stage_parts) if stage_parts else "no stage data"
-            ttfp_text = f", ttfp={item['ttfp_ms']:.2f}ms" if item.get("ttfp_ms") is not None else ""
-            rtf_text = f", rtf={item['rtf']:.3f}" if item.get("rtf") is not None else ""
-            print(f"  request={item['request_id']}, {stage_text}, e2e={item['e2e_total_ms']:.2f}ms{ttfp_text}{rtf_text}")
-
-    print(f"Passed: {passed}/{len(results)}")
-    results_json_path = output_root / "results.json"
-    results_json_path.write_text(
-        json.dumps(
-            [
-                {
-                    "mode": result.mode,
-                    "case": result.case,
-                    "returncode": result.returncode,
-                    "elapsed_s": result.elapsed_s,
-                    "output_dir": str(result.output_dir),
-                    "log_path": str(result.log_path),
-                    "request_summaries": result.request_summaries,
-                }
-                for result in results
-            ],
-            ensure_ascii=False,
-            indent=2,
-        ),
-        encoding="utf-8",
-    )
-    print(f"Wrote results summary to: {results_json_path}")
-
-    if failed:
-        print("Failed cases:")
-        for result in failed:
-            print(f"- [{result.mode}] {result.case}: output dir {result.output_dir}, log {result.log_path}")
-        return 1
-    return 0
 
 
 def _build_profiled_stage_config(
@@ -815,24 +373,6 @@ def parse_args():
         help="Directory for output WAV files.",
     )
     parser.add_argument(
-        "--matrix",
-        choices=["none", "full"],
-        default="none",
-        help="Run a fixed offline smoke matrix. 'full' matches the old examples/offline_inference/voxcpm/test.py coverage.",
-    )
-    parser.add_argument(
-        "--output-root",
-        type=str,
-        default=None,
-        help="Root directory for matrix outputs. Used only with --matrix full.",
-    )
-    parser.add_argument(
-        "--python",
-        type=str,
-        default=sys.executable,
-        help="Python executable used for recursive matrix runs. Used only with --matrix full.",
-    )
-    parser.add_argument(
         "--stage-init-timeout",
         type=int,
         default=600,
@@ -899,12 +439,6 @@ def parse_args():
         parser.error("--num-runs must be >= 1")
     if args.warmup_runs < 0:
         parser.error("--warmup-runs must be >= 0")
-    if args.matrix == "full":
-        if args.ref_audio is None or args.ref_text is None:
-            parser.error("--matrix full requires --ref-audio and --ref-text because clone cases are included")
-        if args.output_root is None:
-            args.output_root = str(DEFAULT_MATRIX_OUTPUT_ROOT)
-        return args
     if args.output_dir is None:
         args.output_dir = (
             "output_audio_streaming" if _is_streaming_stage_config(args.stage_configs_path) else "output_audio"
@@ -1274,9 +808,6 @@ def _run_sync(args) -> list[Path]:
 
 def main(args) -> int:
     logging.basicConfig(level=logging.INFO)
-    if args.matrix == "full":
-        return _run_full_matrix(args)
-
     profiled_stage_config_path: str | None = None
     original_stage_config_path = args.stage_configs_path
     if args.enable_profiler:

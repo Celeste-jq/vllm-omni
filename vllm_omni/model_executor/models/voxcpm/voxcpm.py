@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import importlib
 import json
 import os
 import sys
@@ -22,89 +21,21 @@ from vllm.sequence import IntermediateTensors
 
 from vllm_omni.model_executor.models.output_templates import OmniOutput
 
-from .loader import (
+from .voxcpm_loader import (
     _build_prompt_cache_with_soundfile,
     _device_to_string,
     _force_cuda_available_for_npu,
+    _import_voxcpm_audio_vae_classes,
+    _import_voxcpm_base_model_class,
     _is_torchcodec_load_error,
     _normalize_dtype_name,
     _prepare_runtime_model_dir,
     _resolve_runtime_device,
 )
-from .stage_wrappers import _DirectVoxCPMAudioVAE, _DirectVoxCPMLatentGenerator
+from .voxcpm_stage_wrappers import _DirectVoxCPMAudioVAE, _DirectVoxCPMLatentGenerator
 
 logger = init_logger(__name__)
 _VOXCPM_LATENT_MAGIC = 131071
-
-
-def _iter_voxcpm_src_candidates() -> list[Path]:
-    candidates: list[Path] = []
-    env_path = os.environ.get("VLLM_OMNI_VOXCPM_CODE_PATH")
-    if env_path:
-        candidates.append(Path(env_path).expanduser())
-
-    repo_root = Path(__file__).resolve().parents[4]
-    candidates.append(repo_root.parent / "VoxCPM" / "src")
-
-    unique_candidates: list[Path] = []
-    seen: set[str] = set()
-    for candidate in candidates:
-        candidate_key = str(candidate)
-        if candidate_key in seen:
-            continue
-        seen.add(candidate_key)
-        unique_candidates.append(candidate)
-    return unique_candidates
-
-
-def _prepend_voxcpm_src(candidate: Path) -> None:
-    candidate_str = str(candidate)
-    if candidate_str not in sys.path:
-        sys.path.insert(0, candidate_str)
-
-
-def _import_voxcpm_attrs(module_name: str, *attr_names: str) -> tuple[Any, ...]:
-    last_exc: ImportError | None = None
-    for candidate in _iter_voxcpm_src_candidates():
-        if not candidate.exists():
-            continue
-        _prepend_voxcpm_src(candidate)
-        try:
-            module = importlib.import_module(module_name)
-            return tuple(getattr(module, attr_name) for attr_name in attr_names)
-        except ImportError as exc:
-            last_exc = exc
-
-    try:
-        module = importlib.import_module(module_name)
-        return tuple(getattr(module, attr_name) for attr_name in attr_names)
-    except ImportError as exc:
-        last_exc = exc
-
-    raise ImportError(f"Failed to import {module_name}.") from last_exc
-
-
-def _import_voxcpm_base_model_class():
-    """Import upstream ``VoxCPMModel`` from ``VoxCPM/src/voxcpm`` (env, sibling tree, or pip)."""
-    try:
-        (VoxCPMModel,) = _import_voxcpm_attrs("voxcpm.model.voxcpm", "VoxCPMModel")
-        return VoxCPMModel
-    except ImportError as exc:
-        raise ImportError(
-            "Failed to import VoxCPMModel. Install the `voxcpm` package or set "
-            "`VLLM_OMNI_VOXCPM_CODE_PATH` to the VoxCPM repository `src` directory "
-            "(the parent of the `voxcpm` package that contains `model/` and `modules/`)."
-        ) from exc
-
-
-def _import_voxcpm_audio_vae_classes():
-    try:
-        return _import_voxcpm_attrs("voxcpm.modules.audiovae", "AudioVAE", "AudioVAEConfig")
-    except ImportError as exc:
-        raise ImportError(
-            "Failed to import VoxCPM AudioVAE. Install the `voxcpm` package or set "
-            "`VLLM_OMNI_VOXCPM_CODE_PATH` to the VoxCPM repository `src` directory."
-        ) from exc
 
 
 def _make_voxcpm_model_for_omni(base: type[Any]) -> type[Any]:

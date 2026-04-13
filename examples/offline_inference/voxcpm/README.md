@@ -11,7 +11,8 @@ This directory contains the minimal offline VoxCPM example for vLLM Omni.
 
 Advanced workflows were moved out of the getting-started example:
 
-- `benchmarks/voxcpm/vllm_omni/bench_tts_offline.py`: warmup, batch prompts, profiler, offline TTFP / RTF, fixed smoke matrix
+- `benchmarks/voxcpm/vllm_omni/bench_tts_offline.py`: warmup, batch prompts, profiler, offline TTFP / RTF
+- `benchmarks/voxcpm/vllm_omni/run_offline_matrix.py`: fixed offline smoke matrix
 - `benchmarks/voxcpm/`: benchmark scripts and benchmark docs
 
 ## Prerequisites
@@ -98,13 +99,13 @@ Use `benchmarks/voxcpm/vllm_omni/bench_tts_offline.py` when you need:
 - batch JSONL inputs
 - profiler injection
 - offline TTFP / RTF emission
-- the fixed offline smoke matrix that previously lived in `test.py`
+
+Use `benchmarks/voxcpm/vllm_omni/run_offline_matrix.py` when you need the fixed offline smoke matrix that previously lived in `test.py`.
 
 Full matrix benchmark example:
 
 ```bash
-python benchmarks/voxcpm/vllm_omni/bench_tts_offline.py \
-  --matrix full \
+python benchmarks/voxcpm/vllm_omni/run_offline_matrix.py \
   --model "$VOXCPM_MODEL" \
   --ref-audio /path/to/reference.wav \
   --ref-text "The exact transcript spoken in reference.wav."
@@ -118,5 +119,5 @@ For benchmark reporting, see [benchmarks/voxcpm](../../../benchmarks/voxcpm/READ
 
 - `voxcpm.yaml` is the default non-streaming stage config.
 - `voxcpm_async_chunk.yaml` is the streaming stage config.
-- Streaming is currently single-request oriented; the fixed smoke matrix now lives in `benchmarks/voxcpm/vllm_omni/bench_tts_offline.py --matrix full`.
+- Streaming is currently single-request oriented; the fixed smoke matrix now lives in `benchmarks/voxcpm/vllm_omni/run_offline_matrix.py`.
 - `ref_text` must be the real transcript of the reference audio. Mismatched text usually causes obvious quality degradation.
