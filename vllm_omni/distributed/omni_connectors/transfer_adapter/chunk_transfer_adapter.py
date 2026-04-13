@@ -146,45 +146,16 @@ class OmniChunkTransferAdapter(OmniTransferAdapterBase):
         payload_data, size = result
 
         if payload_data:
-            finished_value = payload_data.get("finished")
-            unwrap_depth = 0
-            while isinstance(finished_value, (list, tuple)) and len(finished_value) == 1 and unwrap_depth < 8:
-                finished_value = finished_value[0]
-                unwrap_depth += 1
-
-            if finished_value is None:
-                finished_flag = False
-            elif isinstance(finished_value, torch.Tensor):
-                if finished_value.numel():
-                    finished_flag = bool(finished_value.detach().cpu().reshape(-1)[0].item())
-                else:
-                    finished_flag = False
-            else:
-                try:
-                    import numpy as np
-
-                    if isinstance(finished_value, np.ndarray):
-                        if finished_value.size:
-                            finished_flag = bool(np.asarray(finished_value.reshape(-1)[0]).item())
-                        else:
-                            finished_flag = False
-                    elif isinstance(finished_value, np.generic):
-                        finished_flag = bool(np.asarray(finished_value).item())
-                    else:
-                        finished_flag = bool(finished_value)
-                except ImportError:
-                    finished_flag = bool(finished_value)
-
             # Update connector state
             self.get_req_chunk[req_id] += 1
 
             if self.model_mode == "ar":
                 self._update_request_payload(external_req_id, payload_data)
                 request.additional_information = payload_data
-                if finished_flag:
+                if payload_data.get("finished"):
                     self.finished_requests.add(req_id)
             else:
-                if finished_flag:
+                if payload_data.get("finished"):
                     self.finished_requests.add(req_id)
 
                 new_ids = payload_data.get("code_predictor_codes", [])
@@ -201,7 +172,7 @@ class OmniChunkTransferAdapter(OmniTransferAdapterBase):
                 request.num_computed_tokens = 0
 
                 # Empty chunk with more data expected: keep polling.
-                if not new_ids and not finished_flag:
+                if not new_ids and not payload_data.get("finished"):
                     return True
 
             # Mark as finished for consumption
@@ -261,8 +232,6 @@ class OmniChunkTransferAdapter(OmniTransferAdapterBase):
                 logger.error(f"Failed to use custom_process_input_func for payload extraction: {e}")
 
         if not payload_data:
-            if is_finished:
-                self.cleanup(request.request_id, getattr(request, "external_req_id", None))
             return
 
         success, size, metadata = self.connector.put(
@@ -275,9 +244,23 @@ class OmniChunkTransferAdapter(OmniTransferAdapterBase):
         if success:
             self.put_req_chunk[external_req_id] += 1
             logger.debug(f"[Stage-{stage_id}] Sent {connector_put_key}")
+            finished_flag = payload_data.get("finished")
+            is_payload_finished = False
+            if isinstance(finished_flag, torch.Tensor):
+                is_payload_finished = finished_flag.numel() == 1 and bool(finished_flag.item())
+            elif finished_flag is not None:
+                is_payload_finished = bool(finished_flag)
+
+            # Reclaim per-request async state only after the terminal payload
+            # has been sent successfully. This avoids cleanup->save races.
+            if is_payload_finished:
+                self.cleanup(request.request_id, external_req_id)
 
         if is_finished:
-            self.cleanup_sender(external_req_id)
+            self.code_prompt_token_ids.pop(external_req_id, None)
+            cached_ic = getattr(self, "_cached_ic", None)
+            if cached_ic is not None:
+                cached_ic.pop(external_req_id, None)
 
     ########################################################################
     # Cleanup
