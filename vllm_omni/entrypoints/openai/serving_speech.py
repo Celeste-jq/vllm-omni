@@ -50,6 +50,7 @@ _FISH_TTS_MODEL_STAGES = {"fish_speech_slow_ar"}
 _COSYVOICE3_TTS_MODEL_STAGES = {"cosyvoice3_talker"}
 _OMNIVOICE_TTS_MODEL_STAGES = {"omnivoice_generator"}
 _VOXCPM_TTS_MODEL_STAGES = {"latent_generator", "vae"}
+_VOXCPM2_TTS_MODEL_STAGES = {"latent_generator"}
 _TTS_MODEL_STAGES: set[str] = (
     _VOXTRAL_TTS_MODEL_STAGES
     | _QWEN3_TTS_MODEL_STAGES
@@ -57,6 +58,7 @@ _TTS_MODEL_STAGES: set[str] = (
     | _COSYVOICE3_TTS_MODEL_STAGES
     | _OMNIVOICE_TTS_MODEL_STAGES
     | _VOXCPM_TTS_MODEL_STAGES
+    | _VOXCPM2_TTS_MODEL_STAGES
 )
 _TTS_LANGUAGES: set[str] = {
     "Auto",
@@ -282,6 +284,11 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
         if self._tts_stage is None:
             return None
         model_stage = getattr(self._tts_stage.engine_args, "model_stage", None)
+        model_arch = getattr(self._tts_stage.engine_args, "model_arch", None)
+        if model_arch == "VoxCPM2TalkerForConditionalGeneration":
+            return "voxcpm2"
+        if model_arch == "VoxCPMForConditionalGeneration":
+            return "voxcpm"
         if model_stage in _QWEN3_TTS_MODEL_STAGES:
             return "qwen3_tts"
         if model_stage in _VOXTRAL_TTS_MODEL_STAGES:
@@ -292,8 +299,12 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
             return "cosyvoice3"
         if model_stage in _OMNIVOICE_TTS_MODEL_STAGES:
             return "omnivoice"
-        if model_stage in _VOXCPM_TTS_MODEL_STAGES:
-            return "voxcpm"
+        if model_stage in (_VOXCPM_TTS_MODEL_STAGES | _VOXCPM2_TTS_MODEL_STAGES):
+            has_vae_stage = any(
+                getattr(getattr(stage, "engine_args", None), "model_stage", None) == "vae"
+                for stage in self.engine_client.stage_configs
+            )
+            return "voxcpm" if has_vae_stage or model_stage == "vae" else "voxcpm2"
         return None
 
     def _compute_max_instructions_length(self) -> int:
@@ -797,6 +808,8 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
             return self._validate_cosyvoice3_request(request)
         if self._tts_model_type == "voxcpm":
             return self._validate_voxcpm_request(request)
+        if self._tts_model_type == "voxcpm2":
+            return None  # VoxCPM2 accepts any text input
         return self._validate_qwen_tts_request(request)
 
     def _validate_ref_audio_format(self, ref_audio: str) -> str | None:
@@ -1489,6 +1502,15 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
                 prompt["lang"] = request.language
             if request.instructions:
                 prompt["instruct"] = request.instructions
+        elif self._tts_model_type == "voxcpm2":
+            tts_params = {}
+            additional: dict[str, Any] = {}
+            if request.ref_audio is not None:
+                wav_list, sr = await self._resolve_ref_audio(request.ref_audio)
+                additional["reference_audio"] = [[wav_list, sr]]
+            prompt = {"prompt": request.input}
+            if additional:
+                prompt["additional_information"] = additional
         elif self._is_tts:
             validation_error = self._validate_tts_request(request)
             if validation_error:
@@ -1527,6 +1549,8 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
             model_type = "cosyvoice3"
         elif self._tts_model_type == "voxcpm":
             model_type = "voxcpm"
+        elif self._tts_model_type == "voxcpm2":
+            model_type = "voxcpm2"
         elif self._is_tts:
             model_type = tts_params.get("task_type", ["unknown"])[0]
         else:
