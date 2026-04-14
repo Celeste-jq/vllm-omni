@@ -47,6 +47,19 @@ def _log_voxcpm_stream_debug(message: str, *args: Any) -> None:
         logger.warning("[VoxCPM][stream-debug] " + message, *args)
 
 
+def _summarize_voxcpm_tensor(value: Any, *, max_values: int = 4) -> str:
+    if not isinstance(value, torch.Tensor):
+        return repr(type(value).__name__)
+    tensor = value.detach().to("cpu")
+    flat = tensor.reshape(-1).to(torch.float32)
+    preview_vals = ", ".join(f"{float(v):.5f}" for v in flat[:max_values].tolist())
+    head_sum = float(flat[: min(max_values * 8, flat.numel())].sum().item()) if flat.numel() > 0 else 0.0
+    return (
+        f"shape={tuple(tensor.shape)} dtype={tensor.dtype} "
+        f"preview=[{preview_vals}] head_sum={head_sum:.5f}"
+    )
+
+
 def _make_voxcpm_model_for_omni(base: type[Any]) -> type[Any]:
     """Subclass upstream VoxCPMModel: local ``_inference`` + ``latents_only`` prompt-cache generation."""
 
@@ -512,7 +525,17 @@ class VoxCPMForConditionalGeneration(nn.Module):
             return infos
         recovered = self._recover_latent_from_input_ids(input_ids)
         if recovered is None:
+            _log_voxcpm_stream_debug(
+                "vae no recovered latent; input_ids_shape=%s infos=%s",
+                tuple(input_ids.shape) if isinstance(input_ids, torch.Tensor) else None,
+                [sorted(info.keys()) if isinstance(info, dict) else type(info).__name__ for info in infos],
+            )
             return infos
+        _log_voxcpm_stream_debug(
+            "vae recovered latent from input_ids: input_ids_shape=%s latent=%s",
+            tuple(input_ids.shape) if isinstance(input_ids, torch.Tensor) else None,
+            _summarize_voxcpm_tensor(recovered),
+        )
         return [{"latent_audio_feat": recovered}]
 
     @staticmethod
@@ -671,9 +694,16 @@ class VoxCPMForConditionalGeneration(nn.Module):
 
         outputs: list[torch.Tensor] = []
         sample_rates: list[torch.Tensor] = []
-        for info in infos:
+        for idx, info in enumerate(infos):
             latent_audio_feat = self._extract_val(info, "latent_audio_feat", None)
             audio_tensor = self._pipeline.decode(latent_audio_feat, trim_streaming_patch=async_chunk)
+            _log_voxcpm_stream_debug(
+                "vae decode idx=%d async_chunk=%s latent=%s audio=%s",
+                idx,
+                async_chunk,
+                _summarize_voxcpm_tensor(latent_audio_feat),
+                _summarize_voxcpm_tensor(audio_tensor),
+            )
             outputs.append(audio_tensor.float().cpu())
             sample_rates.append(torch.tensor(sample_rate, dtype=torch.int32))
 
