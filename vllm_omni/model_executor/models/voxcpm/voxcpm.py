@@ -685,6 +685,7 @@ class VoxCPMForConditionalGeneration(nn.Module):
         outputs: list[torch.Tensor] = []
         sample_rates: list[torch.Tensor] = []
         last_chunk_flags: list[bool] | None = [] if async_chunk else None
+        payload_finished_flags: list[bool] | None = [] if async_chunk else None
         for info in infos:
             text = self._extract_val(info, "text", "")
             cfg_value = float(self._extract_val(info, "cfg_value", 2.0))
@@ -705,6 +706,8 @@ class VoxCPMForConditionalGeneration(nn.Module):
                     outputs.append(torch.zeros((0,), dtype=torch.float32))
                     assert last_chunk_flags is not None
                     last_chunk_flags.append(True)
+                    assert payload_finished_flags is not None
+                    payload_finished_flags.append(False)
                     if terminal_pending == 1:
                         self._latent_stream_terminal_pending.pop(request_key, None)
                     else:
@@ -716,6 +719,8 @@ class VoxCPMForConditionalGeneration(nn.Module):
                     outputs.append(torch.zeros((0,), dtype=torch.float32))
                     assert last_chunk_flags is not None
                     last_chunk_flags.append(True)
+                    assert payload_finished_flags is not None
+                    payload_finished_flags.append(False)
                     sample_rates.append(torch.tensor(sample_rate, dtype=torch.int32))
                     continue
 
@@ -745,6 +750,8 @@ class VoxCPMForConditionalGeneration(nn.Module):
                     outputs.append(torch.zeros((0,), dtype=torch.float32))
                     assert last_chunk_flags is not None
                     last_chunk_flags.append(True)
+                    assert payload_finished_flags is not None
+                    payload_finished_flags.append(False)
                 else:
                     if is_last:
                         self._latent_stream_gens.pop(request_key, None)
@@ -753,6 +760,8 @@ class VoxCPMForConditionalGeneration(nn.Module):
                     outputs.append(chunk_latent.detach().float().cpu())
                     assert last_chunk_flags is not None
                     last_chunk_flags.append(bool(is_last))
+                    assert payload_finished_flags is not None
+                    payload_finished_flags.append(bool(is_last))
                 finally:
                     if created_temp is not None and os.path.exists(created_temp):
                         os.unlink(created_temp)
@@ -781,7 +790,7 @@ class VoxCPMForConditionalGeneration(nn.Module):
             sample_rates.append(torch.tensor(sample_rate, dtype=torch.int32))
 
         self._ar_emit_stop_token = all(last_chunk_flags) if async_chunk and last_chunk_flags else True
-        return self._finalize_stage_output(
+        output = self._finalize_stage_output(
             output_key="latent_audio_feat",
             outputs=outputs,
             sample_rates=sample_rates,
@@ -789,6 +798,11 @@ class VoxCPMForConditionalGeneration(nn.Module):
             out_dtype=out_dtype,
             hidden_rows=hidden_rows,
         )
+        if async_chunk and payload_finished_flags is not None:
+            output.multimodal_outputs["finished"] = [
+                torch.tensor(flag, dtype=torch.bool) for flag in payload_finished_flags
+            ]
+        return output
 
     def compute_logits(self, hidden_states: torch.Tensor | OmniOutput, sampling_metadata: Any = None) -> torch.Tensor:
         del sampling_metadata
