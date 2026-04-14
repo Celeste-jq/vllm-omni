@@ -722,7 +722,7 @@ class VoxCPMForConditionalGeneration(nn.Module):
                     assert last_chunk_flags is not None
                     last_chunk_flags.append(True)
                     assert payload_finished_flags is not None
-                    payload_finished_flags.append(False)
+                    payload_finished_flags.append(terminal_pending == 1)
                     if terminal_pending == 1:
                         self._latent_stream_terminal_pending.pop(request_key, None)
                     else:
@@ -768,7 +768,7 @@ class VoxCPMForConditionalGeneration(nn.Module):
                     assert last_chunk_flags is not None
                     last_chunk_flags.append(True)
                     assert payload_finished_flags is not None
-                    payload_finished_flags.append(False)
+                    payload_finished_flags.append(True)
                 else:
                     if is_last:
                         self._latent_stream_gens.pop(request_key, None)
@@ -789,7 +789,7 @@ class VoxCPMForConditionalGeneration(nn.Module):
                     assert last_chunk_flags is not None
                     last_chunk_flags.append(bool(is_last))
                     assert payload_finished_flags is not None
-                    payload_finished_flags.append(bool(is_last))
+                    payload_finished_flags.append(False)
                 finally:
                     if created_temp is not None and os.path.exists(created_temp):
                         os.unlink(created_temp)
