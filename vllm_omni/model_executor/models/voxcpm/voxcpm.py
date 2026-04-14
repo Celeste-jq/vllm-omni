@@ -4,6 +4,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 import warnings
 import wave
 from collections.abc import Callable, Generator, Iterable
@@ -389,6 +390,9 @@ class VoxCPMForConditionalGeneration(nn.Module):
         self._latent_stream_terminal_pending: dict[str, int] = {}
         self._latent_stream_completed: set[str] = set()
         self._next_local_stream_key = 0
+        self._profile_async_chunks = os.getenv("VOXCPM_PROFILE_CHUNK", "") == "1"
+        self._latent_chunk_profile_counts: dict[str, int] = {}
+        self._vae_chunk_profile_count = 0
         self._ar_emit_stop_token = True
 
     def _runner_hidden_device_dtype(self) -> tuple[torch.device, torch.dtype]:
@@ -646,7 +650,18 @@ class VoxCPMForConditionalGeneration(nn.Module):
         sample_rates: list[torch.Tensor] = []
         for info in infos:
             latent_audio_feat = self._extract_val(info, "latent_audio_feat", None)
+            decode_start = time.perf_counter()
             audio_tensor = self._pipeline.decode(latent_audio_feat, trim_streaming_patch=async_chunk)
+            decode_elapsed_ms = (time.perf_counter() - decode_start) * 1000.0
+            if self._profile_async_chunks and async_chunk:
+                self._vae_chunk_profile_count += 1
+                logger.warning(
+                    "[VoxCPM][chunk-prof] stage=vae idx=%d latent_shape=%s audio_samples=%d decode_ms=%.3f",
+                    self._vae_chunk_profile_count,
+                    tuple(latent_audio_feat.shape) if isinstance(latent_audio_feat, torch.Tensor) else None,
+                    int(audio_tensor.numel()) if isinstance(audio_tensor, torch.Tensor) else -1,
+                    decode_elapsed_ms,
+                )
             outputs.append(audio_tensor.float().cpu())
             sample_rates.append(torch.tensor(sample_rate, dtype=torch.int32))
 
@@ -742,7 +757,9 @@ class VoxCPMForConditionalGeneration(nn.Module):
                     )
                 generator = self._latent_stream_gens[request_key]
                 try:
+                    next_start = time.perf_counter()
                     chunk_latent, is_last = next(generator)
+                    next_elapsed_ms = (time.perf_counter() - next_start) * 1000.0
                 except StopIteration:
                     self._latent_stream_gens.pop(request_key, None)
                     self._latent_stream_terminal_pending[request_key] = 1
@@ -757,6 +774,17 @@ class VoxCPMForConditionalGeneration(nn.Module):
                         self._latent_stream_gens.pop(request_key, None)
                         self._latent_stream_terminal_pending[request_key] = 1
                         self._latent_stream_completed.add(request_key)
+                    if self._profile_async_chunks:
+                        chunk_idx = self._latent_chunk_profile_counts.get(request_key, 0)
+                        self._latent_chunk_profile_counts[request_key] = chunk_idx + 1
+                        logger.warning(
+                            "[VoxCPM][chunk-prof] stage=latent req=%s idx=%d chunk_shape=%s is_last=%s next_ms=%.3f",
+                            request_key,
+                            chunk_idx,
+                            tuple(chunk_latent.shape) if isinstance(chunk_latent, torch.Tensor) else None,
+                            bool(is_last),
+                            next_elapsed_ms,
+                        )
                     outputs.append(chunk_latent.detach().float().cpu())
                     assert last_chunk_flags is not None
                     last_chunk_flags.append(bool(is_last))
