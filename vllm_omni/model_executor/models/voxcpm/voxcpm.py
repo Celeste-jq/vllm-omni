@@ -868,6 +868,14 @@ class VoxCPMForConditionalGeneration(nn.Module):
             sample_rates.append(torch.tensor(sample_rate, dtype=torch.int32))
 
         self._ar_emit_stop_token = all(last_chunk_flags) if async_chunk and last_chunk_flags else True
+        _log_voxcpm_stream_debug(
+            "latent stage finalize async_chunk=%s emit_stop=%s last_chunk_flags=%s hidden_rows=%d outputs=%d",
+            async_chunk,
+            self._ar_emit_stop_token,
+            last_chunk_flags,
+            hidden_rows,
+            len(outputs),
+        )
         return self._finalize_stage_output(
             output_key="latent_audio_feat",
             outputs=outputs,
@@ -895,6 +903,15 @@ class VoxCPMForConditionalGeneration(nn.Module):
         eos_id = 2 if vocab_size > 2 else 0
         safe_id = 1 if vocab_size > 1 and 1 != eos_id else 0
         emit_stop = getattr(self, "_ar_emit_stop_token", True)
+        _log_voxcpm_stream_debug(
+            "compute_logits rows=%d vocab=%d emit_stop=%s eos_id=%d safe_id=%d hidden_shape=%s",
+            num_rows,
+            vocab_size,
+            emit_stop,
+            eos_id,
+            safe_id,
+            tuple(hidden_states.shape),
+        )
         if num_rows > 0:
             if emit_stop:
                 logits[:, eos_id] = 1.0e6
