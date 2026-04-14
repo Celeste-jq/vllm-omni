@@ -396,6 +396,7 @@ class VoxCPMForConditionalGeneration(nn.Module):
         self._pipeline = None
         self._latent_stream_gens: dict[str, Any] = {}
         self._latent_stream_terminal_pending: dict[str, int] = {}
+        self._latent_stream_completed: set[str] = set()
         self._next_local_stream_key = 0
         self._ar_emit_stop_token = True
 
@@ -744,6 +745,18 @@ class VoxCPMForConditionalGeneration(nn.Module):
                     sample_rates.append(torch.tensor(sample_rate, dtype=torch.int32))
                     continue
 
+                if request_key in self._latent_stream_completed:
+                    _log_voxcpm_stream_debug(
+                        "suppress restart for completed req=%s active_generators=%s",
+                        request_key,
+                        sorted(self._latent_stream_gens.keys()),
+                    )
+                    outputs.append(torch.zeros((0,), dtype=torch.float32))
+                    assert last_chunk_flags is not None
+                    last_chunk_flags.append(True)
+                    sample_rates.append(torch.tensor(sample_rate, dtype=torch.int32))
+                    continue
+
                 if request_key not in self._latent_stream_gens:
                     prompt_wav_path, prompt_text, temp_prompt_wav = self._resolve_prompt_inputs(info)
                     created_temp = temp_prompt_wav
@@ -773,6 +786,7 @@ class VoxCPMForConditionalGeneration(nn.Module):
                 except StopIteration:
                     self._latent_stream_gens.pop(request_key, None)
                     self._latent_stream_terminal_pending[request_key] = 1
+                    self._latent_stream_completed.add(request_key)
                     _log_voxcpm_stream_debug(
                         "generator exhausted req=%s; schedule terminal marker; active_after=%s",
                         request_key,
@@ -785,6 +799,7 @@ class VoxCPMForConditionalGeneration(nn.Module):
                     if is_last:
                         self._latent_stream_gens.pop(request_key, None)
                         self._latent_stream_terminal_pending[request_key] = 1
+                        self._latent_stream_completed.add(request_key)
                     _log_voxcpm_stream_debug(
                         "yield chunk req=%s is_last=%s chunk_shape=%s active_after=%s",
                         request_key,
