@@ -555,6 +555,18 @@ async def _collect_streaming_audio(
     return audio_cat, sample_rate, elapsed, first_audio_elapsed
 
 
+async def _abort_streaming_residual_work(
+    omni: AsyncOmni,
+    request_id: str,
+    *,
+    settle_seconds: float = 0.1,
+) -> None:
+    """Stop any late stage-0 work once the final audio has been collected."""
+    await omni.engine.abort_async([request_id])
+    if settle_seconds > 0:
+        await asyncio.sleep(settle_seconds)
+
+
 async def _run_streaming_single(
     omni: AsyncOmni,
     args: Any,
@@ -577,6 +589,7 @@ async def _run_streaming_single(
         prompt_count=prompt_count,
         print_prompt=(run_index == 0 and prompt_index == 0),
     )
+    await _abort_streaming_residual_work(omni, request_id)
     output_path = output_dir / f"output_run{run_index + 1}_{spec.label}.wav"
     _write_audio_tensor(output_path, audio_cat, sample_rate)
     audio_duration_s = float(audio_cat.numel()) / float(sample_rate) if sample_rate > 0 else 0.0
@@ -607,8 +620,10 @@ async def _run_streaming_warmup(args, omni: AsyncOmni) -> None:
     for warmup_index in range(args.warmup_runs):
         t_warmup = time.perf_counter()
         tasks = []
+        request_ids: list[str] = []
         for prompt_index, spec in enumerate(warmup_specs):
             request_id = f"warmup_stream_{warmup_index + 1}_{spec.label}_{uuid.uuid4().hex[:8]}"
+            request_ids.append(request_id)
             tasks.append(
                 _collect_streaming_audio(
                     omni,
@@ -621,6 +636,8 @@ async def _run_streaming_warmup(args, omni: AsyncOmni) -> None:
                 )
             )
         results = await asyncio.gather(*tasks)
+        for request_id in request_ids:
+            await _abort_streaming_residual_work(omni, request_id)
         total_samples = sum(int(audio.numel()) for audio, _, _, _ in results)
         warmup_ttfps = [ttfp for _, _, _, ttfp in results if ttfp is not None]
         ttfp_text = f", ttfp={min(warmup_ttfps):.2f}s" if warmup_ttfps else ""
