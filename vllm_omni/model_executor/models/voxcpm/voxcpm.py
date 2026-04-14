@@ -386,6 +386,8 @@ class VoxCPMForConditionalGeneration(nn.Module):
         self.inject_omni_request_id_into_runtime_info = True
         self._pipeline = None
         self._latent_stream_gens: dict[str, Any] = {}
+        self._latent_stream_terminal_pending: dict[str, int] = {}
+        self._next_local_stream_key = 0
         self._ar_emit_stop_token = True
 
     def _runner_hidden_device_dtype(self) -> tuple[torch.device, torch.dtype]:
@@ -431,6 +433,18 @@ class VoxCPMForConditionalGeneration(nn.Module):
         if isinstance(value, list):
             return value[0] if value else default
         return value
+
+    def _resolve_stream_request_key(self, info: dict[str, Any]) -> str:
+        request_key = info.get("_omni_req_id")
+        if request_key is not None:
+            return str(request_key)
+
+        request_key = info.get("__voxcpm_stream_key")
+        if request_key is None:
+            request_key = f"voxcpm-local-{self._next_local_stream_key}"
+            self._next_local_stream_key += 1
+            info["__voxcpm_stream_key"] = request_key
+        return str(request_key)
 
     def _recover_latent_from_input_ids(self, input_ids: torch.Tensor | None) -> torch.Tensor | None:
         if input_ids is None or input_ids.numel() == 0:
@@ -677,10 +691,22 @@ class VoxCPMForConditionalGeneration(nn.Module):
             retry_badcase_ratio_threshold = float(self._extract_val(info, "retry_badcase_ratio_threshold", 6.0))
             streaming_prefix_len = int(self._extract_val(info, "streaming_prefix_len", 3))
 
-            request_key = str(info.get("_omni_req_id", "0"))
+            request_key = self._resolve_stream_request_key(info)
             created_temp: str | None = None
 
             if async_chunk:
+                terminal_pending = self._latent_stream_terminal_pending.get(request_key, 0)
+                if terminal_pending > 0:
+                    outputs.append(torch.zeros((0,), dtype=torch.float32))
+                    assert last_chunk_flags is not None
+                    last_chunk_flags.append(True)
+                    if terminal_pending == 1:
+                        self._latent_stream_terminal_pending.pop(request_key, None)
+                    else:
+                        self._latent_stream_terminal_pending[request_key] = terminal_pending - 1
+                    sample_rates.append(torch.tensor(sample_rate, dtype=torch.int32))
+                    continue
+
                 if request_key not in self._latent_stream_gens:
                     prompt_wav_path, prompt_text, temp_prompt_wav = self._resolve_prompt_inputs(info)
                     created_temp = temp_prompt_wav
@@ -702,12 +728,14 @@ class VoxCPMForConditionalGeneration(nn.Module):
                     chunk_latent, is_last = next(generator)
                 except StopIteration:
                     self._latent_stream_gens.pop(request_key, None)
+                    self._latent_stream_terminal_pending[request_key] = 1
                     outputs.append(torch.zeros((0,), dtype=torch.float32))
                     assert last_chunk_flags is not None
                     last_chunk_flags.append(True)
                 else:
                     if is_last:
                         self._latent_stream_gens.pop(request_key, None)
+                        self._latent_stream_terminal_pending[request_key] = 1
                     outputs.append(chunk_latent.detach().float().cpu())
                     assert last_chunk_flags is not None
                     last_chunk_flags.append(bool(is_last))
