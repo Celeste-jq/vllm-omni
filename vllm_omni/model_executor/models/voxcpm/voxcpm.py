@@ -67,7 +67,9 @@ def _make_voxcpm_model_for_omni(base: type[Any]) -> type[Any]:
             cfg_value: float = 2.0,
             streaming: bool = False,
             streaming_prefix_len: int = 3,
+            profile_tag: str | None = None,
         ) -> Generator[tuple[torch.Tensor, torch.Tensor | list[torch.Tensor]], None, None]:
+            profile_inference = os.getenv("VOXCPM_PROFILE_INFERENCE_STEP", "0") == "1"
             B, _, _, _ = feat.shape
 
             feat_embed = self.feat_encoder(feat)
@@ -86,24 +88,40 @@ def _make_voxcpm_model_for_omni(base: type[Any]) -> type[Any]:
                 prompt_context_patches = list(feat[:, -context_len:, :, :].split(1, dim=1))
                 pred_feat_seq = prompt_context_patches + pred_feat_seq
 
+            base_prefill_start = time.perf_counter()
             enc_outputs, kv_cache_tuple = self.base_lm(
                 inputs_embeds=combined_embed,
                 is_causal=True,
             )
+            base_prefill_ms = (time.perf_counter() - base_prefill_start) * 1000.0
             self.base_lm.kv_cache.fill_caches(kv_cache_tuple)
 
             enc_outputs = self.fsq_layer(enc_outputs) * feat_mask.unsqueeze(-1) + enc_outputs * text_mask.unsqueeze(-1)
             lm_hidden = enc_outputs[:, -1, :]
 
+            residual_prefill_start = time.perf_counter()
             residual_enc_outputs, residual_kv_cache_tuple = self.residual_lm(
                 inputs_embeds=enc_outputs + feat_mask.unsqueeze(-1) * feat_embed,
                 is_causal=True,
             )
+            residual_prefill_ms = (time.perf_counter() - residual_prefill_start) * 1000.0
             self.residual_lm.kv_cache.fill_caches(residual_kv_cache_tuple)
             residual_hidden = residual_enc_outputs[:, -1, :]
+            if profile_inference:
+                logger.warning(
+                    "[VoxCPM][infer-prof] tag=%s prefill text_tokens=%d audio_patches=%d streaming=%s base_prefill_ms=%.3f residual_prefill_ms=%.3f",
+                    profile_tag or "-",
+                    int(text.shape[-1]),
+                    int(audio_patch_count),
+                    streaming,
+                    base_prefill_ms,
+                    residual_prefill_ms,
+                )
 
             for step_idx in tqdm(range(max_len)):
+                step_start = time.perf_counter()
                 dit_hidden = self.lm_to_dit_proj(lm_hidden) + self.res_to_dit_proj(residual_hidden)
+                decoder_start = time.perf_counter()
                 pred_feat = self.feat_decoder(
                     mu=dit_hidden,
                     patch_size=self.patch_size,
@@ -111,6 +129,7 @@ def _make_voxcpm_model_for_omni(base: type[Any]) -> type[Any]:
                     n_timesteps=inference_timesteps,
                     cfg_value=cfg_value,
                 ).transpose(1, 2)
+                decoder_ms = (time.perf_counter() - decoder_start) * 1000.0
 
                 curr_embed = self.enc_to_lm_proj(self.feat_encoder(pred_feat.unsqueeze(1)))
                 pred_feat_seq.append(pred_feat.unsqueeze(1))
@@ -121,19 +140,47 @@ def _make_voxcpm_model_for_omni(base: type[Any]) -> type[Any]:
                     feat_pred = rearrange(pred_feat_chunk, "b t p d -> b d (t p)", b=B, p=self.patch_size)
                     yield feat_pred, pred_feat_seq
 
+                stop_start = time.perf_counter()
                 stop_flag = self.stop_head(self.stop_actn(self.stop_proj(lm_hidden))).argmax(dim=-1)[0].cpu().item()
+                stop_ms = (time.perf_counter() - stop_start) * 1000.0
                 if step_idx > min_len and stop_flag == 1:
+                    if profile_inference:
+                        logger.warning(
+                            "[VoxCPM][infer-prof] tag=%s step=%d total_ms=%.3f decoder_ms=%.3f stop_ms=%.3f base_step_ms=0.000 residual_step_ms=0.000 stop_flag=%d break=1",
+                            profile_tag or "-",
+                            step_idx,
+                            (time.perf_counter() - step_start) * 1000.0,
+                            decoder_ms,
+                            stop_ms,
+                            int(stop_flag),
+                        )
                     break
 
+                base_step_start = time.perf_counter()
                 lm_hidden = self.base_lm.forward_step(
                     curr_embed[:, 0, :],
                     torch.tensor([self.base_lm.kv_cache.step()], device=curr_embed.device),
                 ).clone()
+                base_step_ms = (time.perf_counter() - base_step_start) * 1000.0
                 lm_hidden = self.fsq_layer(lm_hidden)
+                residual_step_start = time.perf_counter()
                 residual_hidden = self.residual_lm.forward_step(
                     lm_hidden + curr_embed[:, 0, :],
                     torch.tensor([self.residual_lm.kv_cache.step()], device=curr_embed.device),
                 ).clone()
+                residual_step_ms = (time.perf_counter() - residual_step_start) * 1000.0
+                if profile_inference:
+                    logger.warning(
+                        "[VoxCPM][infer-prof] tag=%s step=%d total_ms=%.3f decoder_ms=%.3f stop_ms=%.3f base_step_ms=%.3f residual_step_ms=%.3f stop_flag=%d break=0",
+                        profile_tag or "-",
+                        step_idx,
+                        (time.perf_counter() - step_start) * 1000.0,
+                        decoder_ms,
+                        stop_ms,
+                        base_step_ms,
+                        residual_step_ms,
+                        int(stop_flag),
+                    )
 
             if not streaming:
                 pred_feat_seq_cat = torch.cat(pred_feat_seq, dim=1)
@@ -153,6 +200,7 @@ def _make_voxcpm_model_for_omni(base: type[Any]) -> type[Any]:
             retry_badcase_max_times: int = 3,
             retry_badcase_ratio_threshold: float = 6.0,
             streaming_prefix_len: int = 3,
+            profile_tag: str | None = None,
         ) -> tuple[None, torch.Tensor, torch.Tensor]:
             return next(
                 self._generate_with_prompt_cache(
@@ -168,6 +216,7 @@ def _make_voxcpm_model_for_omni(base: type[Any]) -> type[Any]:
                     streaming=False,
                     streaming_prefix_len=streaming_prefix_len,
                     latents_only=True,
+                    profile_tag=profile_tag,
                 )
             )
 
@@ -184,6 +233,7 @@ def _make_voxcpm_model_for_omni(base: type[Any]) -> type[Any]:
             retry_badcase_max_times: int = 3,
             retry_badcase_ratio_threshold: float = 6.0,
             streaming_prefix_len: int = 3,
+            profile_tag: str | None = None,
         ) -> Generator[tuple[None, torch.Tensor, torch.Tensor], None, None]:
             return self._generate_with_prompt_cache(
                 target_text=target_text,
@@ -198,6 +248,7 @@ def _make_voxcpm_model_for_omni(base: type[Any]) -> type[Any]:
                 streaming=True,
                 streaming_prefix_len=streaming_prefix_len,
                 latents_only=True,
+                profile_tag=profile_tag,
             )
 
         @torch.inference_mode()
@@ -215,6 +266,7 @@ def _make_voxcpm_model_for_omni(base: type[Any]) -> type[Any]:
             streaming: bool = False,
             streaming_prefix_len: int = 3,
             latents_only: bool = False,
+            profile_tag: str | None = None,
         ) -> Generator[tuple[torch.Tensor | None, torch.Tensor, torch.Tensor | list[torch.Tensor]], None, None]:
             if retry_badcase and streaming:
                 warnings.warn("Retry on bad cases is not supported in streaming mode, setting retry_badcase=False.")
@@ -273,6 +325,7 @@ def _make_voxcpm_model_for_omni(base: type[Any]) -> type[Any]:
                     cfg_value=cfg_value,
                     streaming=streaming,
                     streaming_prefix_len=streaming_prefix_len,
+                    profile_tag=profile_tag,
                 )
                 if streaming:
                     patch_len = self.patch_size * self.chunk_size

@@ -116,6 +116,7 @@ class _DirectVoxCPMLatentGenerator:
             retry_badcase_max_times=retry_badcase_max_times,
             retry_badcase_ratio_threshold=retry_badcase_ratio_threshold,
             streaming_prefix_len=streaming_prefix_len,
+            profile_tag=profile_tag,
         )
         stream_source = "generate_latents_with_prompt_cache_streaming"
         create_start = time.perf_counter()
