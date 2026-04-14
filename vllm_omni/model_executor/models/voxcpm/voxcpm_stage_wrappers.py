@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import logging
 import os
+import time
 from collections.abc import Generator
 from typing import Any
 
@@ -8,11 +10,14 @@ import torch
 import torch.nn as nn
 from einops import rearrange
 
+logger = logging.getLogger(__name__)
+
 
 class _DirectVoxCPMLatentGenerator:
     def __init__(self, tts_model: Any):
         self.tts_model = tts_model
         self.sample_rate = int(getattr(tts_model, "sample_rate", 24000))
+        self._profile_stream_inner = os.getenv("VOXCPM_PROFILE_STREAM_INNER", "0") == "1"
 
     def generate_latents(
         self,
@@ -80,6 +85,7 @@ class _DirectVoxCPMLatentGenerator:
         retry_badcase: bool = False,
         retry_badcase_max_times: int = 3,
         retry_badcase_ratio_threshold: float = 6.0,
+        profile_tag: str | None = None,
     ) -> Generator[tuple[torch.Tensor, bool], None, None]:
         """Yield ``(latent_window, is_last_chunk)`` for Omni async_chunk latent to VAE."""
         if not isinstance(text, str) or not text.strip():
@@ -90,11 +96,14 @@ class _DirectVoxCPMLatentGenerator:
             raise FileNotFoundError(f"prompt_wav_path does not exist: {prompt_wav_path}")
 
         prompt_cache = None
+        prompt_cache_ms = 0.0
         if prompt_wav_path is not None and prompt_text is not None:
+            prompt_cache_start = time.perf_counter()
             prompt_cache = self.tts_model.build_prompt_cache(
                 prompt_text=prompt_text,
                 prompt_wav_path=prompt_wav_path,
             )
+            prompt_cache_ms = (time.perf_counter() - prompt_cache_start) * 1000.0
 
         gen_kw = dict(
             target_text=" ".join(text.split()),
@@ -108,25 +117,57 @@ class _DirectVoxCPMLatentGenerator:
             retry_badcase_ratio_threshold=retry_badcase_ratio_threshold,
             streaming_prefix_len=streaming_prefix_len,
         )
+        stream_source = "generate_latents_with_prompt_cache_streaming"
+        create_start = time.perf_counter()
         stream_entry = getattr(self.tts_model, "generate_latents_with_prompt_cache_streaming", None)
         if stream_entry is not None:
             gen = stream_entry(**gen_kw)
         else:
             fallback_stream_entry = getattr(self.tts_model, "generate_with_prompt_cache_streaming", None)
             if fallback_stream_entry is not None:
+                stream_source = "generate_with_prompt_cache_streaming"
                 gen = fallback_stream_entry(**gen_kw, latents_only=True)
             else:
+                stream_source = "_generate_with_prompt_cache"
                 gen = self.tts_model._generate_with_prompt_cache(streaming=True, latents_only=True, **gen_kw)
+        create_ms = (time.perf_counter() - create_start) * 1000.0
 
         iterator = iter(gen)
+        bootstrap_start = time.perf_counter()
         previous = next(iterator, None)
+        bootstrap_ms = (time.perf_counter() - bootstrap_start) * 1000.0
+        if self._profile_stream_inner:
+            logger.warning(
+                "[VoxCPM][stream-inner] tag=%s source=%s text_len=%d prompt_cache=%s prompt_cache_ms=%.3f create_ms=%.3f bootstrap_ms=%.3f first_none=%s",
+                profile_tag or "-",
+                stream_source,
+                len(text),
+                prompt_cache is not None,
+                prompt_cache_ms,
+                create_ms,
+                bootstrap_ms,
+                previous is None,
+            )
+        chunk_idx = 0
         while previous is not None:
+            step_start = time.perf_counter()
             current = next(iterator, None)
+            step_ms = (time.perf_counter() - step_start) * 1000.0
             _, _target_tok, chunk_latent = previous
             if not isinstance(chunk_latent, torch.Tensor):
                 chunk_latent = torch.as_tensor(chunk_latent)
+            if self._profile_stream_inner:
+                logger.warning(
+                    "[VoxCPM][stream-inner] tag=%s idx=%d yielded_shape=%s step_ms=%.3f is_last=%s",
+                    profile_tag or "-",
+                    chunk_idx,
+                    tuple(chunk_latent.shape),
+                    step_ms,
+                    current is None,
+                )
             yield chunk_latent, current is None
             previous = current
+            chunk_idx += 1
 
 
 class _DirectVoxCPMAudioVAE:

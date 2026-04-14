@@ -754,6 +754,7 @@ class VoxCPMForConditionalGeneration(nn.Module):
                         retry_badcase=False,
                         retry_badcase_max_times=retry_badcase_max_times,
                         retry_badcase_ratio_threshold=retry_badcase_ratio_threshold,
+                        profile_tag=request_key,
                     )
                 generator = self._latent_stream_gens[request_key]
                 try:
