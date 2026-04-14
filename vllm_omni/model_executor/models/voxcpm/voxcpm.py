@@ -38,28 +38,6 @@ logger = init_logger(__name__)
 _VOXCPM_LATENT_MAGIC = 131071
 
 
-def _voxcpm_stream_debug_enabled() -> bool:
-    return os.environ.get("VOXCPM_DEBUG_STREAM", "").strip().lower() in {"1", "true", "yes", "on"}
-
-
-def _log_voxcpm_stream_debug(message: str, *args: Any) -> None:
-    if _voxcpm_stream_debug_enabled():
-        logger.warning("[VoxCPM][stream-debug] " + message, *args)
-
-
-def _summarize_voxcpm_tensor(value: Any, *, max_values: int = 4) -> str:
-    if not isinstance(value, torch.Tensor):
-        return repr(type(value).__name__)
-    tensor = value.detach().to("cpu")
-    flat = tensor.reshape(-1).to(torch.float32)
-    preview_vals = ", ".join(f"{float(v):.5f}" for v in flat[:max_values].tolist())
-    head_sum = float(flat[: min(max_values * 8, flat.numel())].sum().item()) if flat.numel() > 0 else 0.0
-    return (
-        f"shape={tuple(tensor.shape)} dtype={tensor.dtype} "
-        f"preview=[{preview_vals}] head_sum={head_sum:.5f}"
-    )
-
-
 def _make_voxcpm_model_for_omni(base: type[Any]) -> type[Any]:
     """Subclass upstream VoxCPMModel: local ``_inference`` + ``latents_only`` prompt-cache generation."""
 
@@ -460,35 +438,17 @@ class VoxCPMForConditionalGeneration(nn.Module):
     def _resolve_stream_request_key(self, info: dict[str, Any]) -> str:
         request_key = info.get("__voxcpm_stream_key")
         if request_key is not None:
-            upstream_request_key = info.get("_omni_req_id")
-            if upstream_request_key is not None and str(upstream_request_key) != str(request_key):
-                _log_voxcpm_stream_debug(
-                    "keep cached stream key=%s instead of late _omni_req_id=%s; info_keys=%s",
-                    request_key,
-                    upstream_request_key,
-                    sorted(info.keys()),
-                )
             return str(request_key)
 
         request_key = info.get("_omni_req_id")
         if request_key is not None:
             request_key = str(request_key)
             info["__voxcpm_stream_key"] = request_key
-            _log_voxcpm_stream_debug(
-                "bind stream key from _omni_req_id=%s; info_keys=%s",
-                request_key,
-                sorted(info.keys()),
-            )
             return request_key
 
         request_key = f"voxcpm-local-{self._next_local_stream_key}"
         self._next_local_stream_key += 1
         info["__voxcpm_stream_key"] = request_key
-        _log_voxcpm_stream_debug(
-            "synthesize local stream key=%s; info_keys=%s",
-            request_key,
-            sorted(info.keys()),
-        )
         return str(request_key)
 
     def _recover_latent_from_input_ids(self, input_ids: torch.Tensor | None) -> torch.Tensor | None:
@@ -525,17 +485,7 @@ class VoxCPMForConditionalGeneration(nn.Module):
             return infos
         recovered = self._recover_latent_from_input_ids(input_ids)
         if recovered is None:
-            _log_voxcpm_stream_debug(
-                "vae no recovered latent; input_ids_shape=%s infos=%s",
-                tuple(input_ids.shape) if isinstance(input_ids, torch.Tensor) else None,
-                [sorted(info.keys()) if isinstance(info, dict) else type(info).__name__ for info in infos],
-            )
             return infos
-        _log_voxcpm_stream_debug(
-            "vae recovered latent from input_ids: input_ids_shape=%s latent=%s",
-            tuple(input_ids.shape) if isinstance(input_ids, torch.Tensor) else None,
-            _summarize_voxcpm_tensor(recovered),
-        )
         return [{"latent_audio_feat": recovered}]
 
     @staticmethod
@@ -694,16 +644,9 @@ class VoxCPMForConditionalGeneration(nn.Module):
 
         outputs: list[torch.Tensor] = []
         sample_rates: list[torch.Tensor] = []
-        for idx, info in enumerate(infos):
+        for info in infos:
             latent_audio_feat = self._extract_val(info, "latent_audio_feat", None)
             audio_tensor = self._pipeline.decode(latent_audio_feat, trim_streaming_patch=async_chunk)
-            _log_voxcpm_stream_debug(
-                "vae decode idx=%d async_chunk=%s latent=%s audio=%s",
-                idx,
-                async_chunk,
-                _summarize_voxcpm_tensor(latent_audio_feat),
-                _summarize_voxcpm_tensor(audio_tensor),
-            )
             outputs.append(audio_tensor.float().cpu())
             sample_rates.append(torch.tensor(sample_rate, dtype=torch.int32))
 
@@ -759,12 +702,6 @@ class VoxCPMForConditionalGeneration(nn.Module):
             if async_chunk:
                 terminal_pending = self._latent_stream_terminal_pending.get(request_key, 0)
                 if terminal_pending > 0:
-                    _log_voxcpm_stream_debug(
-                        "emit terminal marker req=%s terminal_pending=%d active_generators=%s",
-                        request_key,
-                        terminal_pending,
-                        sorted(self._latent_stream_gens.keys()),
-                    )
                     outputs.append(torch.zeros((0,), dtype=torch.float32))
                     assert last_chunk_flags is not None
                     last_chunk_flags.append(True)
@@ -776,11 +713,6 @@ class VoxCPMForConditionalGeneration(nn.Module):
                     continue
 
                 if request_key in self._latent_stream_completed:
-                    _log_voxcpm_stream_debug(
-                        "suppress restart for completed req=%s active_generators=%s",
-                        request_key,
-                        sorted(self._latent_stream_gens.keys()),
-                    )
                     outputs.append(torch.zeros((0,), dtype=torch.float32))
                     assert last_chunk_flags is not None
                     last_chunk_flags.append(True)
@@ -790,13 +722,6 @@ class VoxCPMForConditionalGeneration(nn.Module):
                 if request_key not in self._latent_stream_gens:
                     prompt_wav_path, prompt_text, temp_prompt_wav = self._resolve_prompt_inputs(info)
                     created_temp = temp_prompt_wav
-                    _log_voxcpm_stream_debug(
-                        "create generator req=%s text_len=%d prompt=%s active_before=%s",
-                        request_key,
-                        len(text),
-                        prompt_wav_path is not None,
-                        sorted(self._latent_stream_gens.keys()),
-                    )
                     self._latent_stream_gens[request_key] = self._pipeline.iter_latent_chunks_streaming(
                         text=text,
                         prompt_wav_path=prompt_wav_path,
@@ -817,11 +742,6 @@ class VoxCPMForConditionalGeneration(nn.Module):
                     self._latent_stream_gens.pop(request_key, None)
                     self._latent_stream_terminal_pending[request_key] = 1
                     self._latent_stream_completed.add(request_key)
-                    _log_voxcpm_stream_debug(
-                        "generator exhausted req=%s; schedule terminal marker; active_after=%s",
-                        request_key,
-                        sorted(self._latent_stream_gens.keys()),
-                    )
                     outputs.append(torch.zeros((0,), dtype=torch.float32))
                     assert last_chunk_flags is not None
                     last_chunk_flags.append(True)
@@ -830,13 +750,6 @@ class VoxCPMForConditionalGeneration(nn.Module):
                         self._latent_stream_gens.pop(request_key, None)
                         self._latent_stream_terminal_pending[request_key] = 1
                         self._latent_stream_completed.add(request_key)
-                    _log_voxcpm_stream_debug(
-                        "yield chunk req=%s is_last=%s chunk_shape=%s active_after=%s",
-                        request_key,
-                        bool(is_last),
-                        tuple(chunk_latent.shape),
-                        sorted(self._latent_stream_gens.keys()),
-                    )
                     outputs.append(chunk_latent.detach().float().cpu())
                     assert last_chunk_flags is not None
                     last_chunk_flags.append(bool(is_last))
@@ -868,14 +781,6 @@ class VoxCPMForConditionalGeneration(nn.Module):
             sample_rates.append(torch.tensor(sample_rate, dtype=torch.int32))
 
         self._ar_emit_stop_token = all(last_chunk_flags) if async_chunk and last_chunk_flags else True
-        _log_voxcpm_stream_debug(
-            "latent stage finalize async_chunk=%s emit_stop=%s last_chunk_flags=%s hidden_rows=%d outputs=%d",
-            async_chunk,
-            self._ar_emit_stop_token,
-            last_chunk_flags,
-            hidden_rows,
-            len(outputs),
-        )
         return self._finalize_stage_output(
             output_key="latent_audio_feat",
             outputs=outputs,
@@ -903,15 +808,6 @@ class VoxCPMForConditionalGeneration(nn.Module):
         eos_id = 2 if vocab_size > 2 else 0
         safe_id = 1 if vocab_size > 1 and 1 != eos_id else 0
         emit_stop = getattr(self, "_ar_emit_stop_token", True)
-        _log_voxcpm_stream_debug(
-            "compute_logits rows=%d vocab=%d emit_stop=%s eos_id=%d safe_id=%d hidden_shape=%s",
-            num_rows,
-            vocab_size,
-            emit_stop,
-            eos_id,
-            safe_id,
-            tuple(hidden_states.shape),
-        )
         if num_rows > 0:
             if emit_stop:
                 logits[:, eos_id] = 1.0e6
@@ -938,13 +834,6 @@ class VoxCPMForConditionalGeneration(nn.Module):
             out_device = input_ids.device
 
         infos = model_intermediate_buffer or runtime_additional_information or [{}]
-        _log_voxcpm_stream_debug(
-            "forward stage=%s async_chunk=%s batch=%d info_keys=%s",
-            self.model_stage,
-            bool(getattr(self.vllm_config.model_config, "async_chunk", False)),
-            len(infos),
-            [sorted(info.keys()) if isinstance(info, dict) else type(info).__name__ for info in infos],
-        )
         hidden_rows = len(infos)
         if input_ids is not None and len(input_ids.shape) > 0:
             hidden_rows = max(hidden_rows, int(input_ids.shape[0]))

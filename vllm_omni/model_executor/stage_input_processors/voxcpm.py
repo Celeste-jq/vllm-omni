@@ -103,8 +103,8 @@ def latent2vae_async_chunk(
     if not isinstance(pooling_output, dict):
         if finished_request:
             return {
-                "code_predictor_codes": [0],
-                "finished": True,
+                "code_predictor_codes": [],
+                "finished": torch.tensor(True, dtype=torch.bool),
             }
         return None
 
@@ -115,14 +115,14 @@ def latent2vae_async_chunk(
     if latent is None:
         if finished_request:
             return {
-                "code_predictor_codes": [0],
-                "finished": True,
+                "code_predictor_codes": [],
+                "finished": torch.tensor(True, dtype=torch.bool),
             }
         return None
 
     serialized_codes = _serialize_latent_to_codes(latent)
     out: dict[str, Any] = {
         "code_predictor_codes": serialized_codes,
-        "finished": finished_request,
+        "finished": torch.tensor(finished_request, dtype=torch.bool),
     }
     return out

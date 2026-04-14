@@ -519,13 +519,17 @@ async def _collect_streaming_audio(
             n = int(w.numel())
             if n == 0:
                 continue
+            finished = _extract_stream_finished(stage_output)
             if n > prev_total_samples:
                 delta = w.reshape(-1)[prev_total_samples:]
                 prev_total_samples = n
+            elif finished and n == prev_total_samples:
+                delta = w.reshape(-1)[:0]
             else:
                 delta = w.reshape(-1)
                 prev_total_samples += int(delta.numel())
-            delta_chunks.append(delta)
+            if int(delta.numel()) > 0:
+                delta_chunks.append(delta)
             if first_audio_elapsed is None and int(delta.numel()) > 0:
                 first_audio_elapsed = time.perf_counter() - t_start
             logger.info(
@@ -536,7 +540,7 @@ async def _collect_streaming_audio(
                 chunk_i,
                 int(delta.numel()),
                 n,
-                _extract_stream_finished(stage_output),
+                finished,
             )
             chunk_i += 1
         except ValueError:
