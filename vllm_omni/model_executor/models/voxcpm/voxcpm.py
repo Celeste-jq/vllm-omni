@@ -865,6 +865,7 @@ class VoxCPMForConditionalGeneration(nn.Module):
         intermediate_tensors: Any = None,
         inputs_embeds: torch.Tensor | None = None,
         runtime_additional_information: list[dict[str, Any]] | None = None,
+        model_intermediate_buffer: list[dict[str, Any]] | None = None,
         **kwargs: Any,
     ) -> OmniOutput:
         del positions, intermediate_tensors, inputs_embeds, kwargs
@@ -873,7 +874,7 @@ class VoxCPMForConditionalGeneration(nn.Module):
         if input_ids is not None and input_ids.device.type == out_device.type:
             out_device = input_ids.device
 
-        infos = runtime_additional_information or [{}]
+        infos = model_intermediate_buffer or runtime_additional_information or [{}]
         hidden_rows = len(infos)
         if input_ids is not None and len(input_ids.shape) > 0:
             hidden_rows = max(hidden_rows, int(input_ids.shape[0]))
