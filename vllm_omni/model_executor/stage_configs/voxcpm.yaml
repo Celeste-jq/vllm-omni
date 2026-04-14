@@ -28,6 +28,7 @@ stage_args:
       top_p: 1.0
       top_k: -1
       max_tokens: 4096
+      stop_token_ids: [2]
       seed: 42
       detokenize: false
       repetition_penalty: 1.0
