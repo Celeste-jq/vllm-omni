@@ -70,6 +70,32 @@ steps:
               volumes:
                 - "/fsx/hf_cache:/fsx/hf_cache"
 
+      - label: ":full_moon: Omni · VoxCPM E2E Test with L4"
+        timeout_in_minutes: 30
+        depends_on: upload-nightly-pipeline
+        if: *nightly_or_pr_label
+        commands:
+          - |
+            timeout 30m bash -c '
+              pip install voxcpm
+              export VLLM_LOGGING_LEVEL=DEBUG
+              export VLLM_WORKER_MULTIPROC_METHOD=spawn
+              pytest -s -v tests/e2e/offline_inference/test_voxcpm.py -m "advanced_model" --run-level "advanced_model"
+            '
+        agents:
+          queue: "gpu_4_queue" # g6.12xlarge instance on AWS, has 4 L4 GPU
+        plugins:
+          - docker#v5.2.0:
+              image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT
+              always-pull: true
+              propagate-environment: true
+              shm-size: "8gb"
+              environment:
+                - "HF_HOME=/fsx/hf_cache"
+                - "HF_TOKEN"
+              volumes:
+                - "/fsx/hf_cache:/fsx/hf_cache"
+
       - label: ":full_moon: Omni · Doc Test with L4"
         timeout_in_minutes: 90
         depends_on: upload-nightly-pipeline
