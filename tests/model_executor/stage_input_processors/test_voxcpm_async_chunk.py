@@ -51,12 +51,13 @@ def test_latent2vae_async_chunk_serializes_latent_payload():
 
     payload = latent2vae_async_chunk(
         transfer_manager=None,
-        pooling_output={"latent_audio_feat": latent},
+        pooling_output={"latent_audio_feat": latent, "left_context_size": 1},
         request=_request(finished=False),
         is_finished=torch.tensor(False),
     )
 
     assert payload is not None
+    assert payload["left_context_size"] == 1
     assert torch.equal(payload["finished"], torch.tensor(False, dtype=torch.bool))
     recovered = _decode_serialized_latent(payload["code_predictor_codes"])
     torch.testing.assert_close(recovered, latent.to(torch.bfloat16).to(torch.float32).unsqueeze(0))
@@ -72,6 +73,7 @@ def test_latent2vae_async_chunk_returns_terminal_marker_without_latent():
 
     assert payload == {
         "code_predictor_codes": [],
+        "left_context_size": 0,
         "finished": torch.tensor(True, dtype=torch.bool),
     }
 
@@ -85,3 +87,22 @@ def test_latent2vae_async_chunk_returns_none_for_nonterminal_empty_chunk():
     )
 
     assert payload is None
+
+
+def test_latent2vae_async_chunk_respects_explicit_terminal_payload():
+    payload = latent2vae_async_chunk(
+        transfer_manager=None,
+        pooling_output={
+            "latent_audio_feat": None,
+            "left_context_size": 0,
+            "finished": True,
+        },
+        request=_request(finished=False),
+        is_finished=False,
+    )
+
+    assert payload == {
+        "code_predictor_codes": [],
+        "left_context_size": 0,
+        "finished": torch.tensor(True, dtype=torch.bool),
+    }

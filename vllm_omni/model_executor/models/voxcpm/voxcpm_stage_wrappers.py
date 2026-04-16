@@ -8,6 +8,8 @@ import torch
 import torch.nn as nn
 from einops import rearrange
 
+from .voxcpm_stage1_decoder import VoxCPMStage1Decoder
+
 
 class _DirectVoxCPMLatentGenerator:
     def __init__(self, tts_model: Any):
@@ -137,6 +139,7 @@ class _DirectVoxCPMAudioVAE:
         self.patch_size = int(patch_size)
         self._chunk_size = int(getattr(audio_vae, "chunk_size", 1))
         self._stream_audio_patch_samples = max(1, self.patch_size * self._chunk_size)
+        self._stage1_decoder = VoxCPMStage1Decoder(self._stream_audio_patch_samples)
 
     def _prepare_latents_for_decode(self, latent_audio_feat: Any) -> torch.Tensor:
         latents = latent_audio_feat
@@ -164,7 +167,13 @@ class _DirectVoxCPMAudioVAE:
         return latents
 
     @torch.no_grad()
-    def decode(self, latent_audio_feat: Any, *, trim_streaming_patch: bool = False) -> torch.Tensor:
+    def decode(
+        self,
+        latent_audio_feat: Any,
+        *,
+        left_context_size: int = 0,
+        trim_streaming_patch: bool = False,
+    ) -> torch.Tensor:
         latents = self._prepare_latents_for_decode(latent_audio_feat)
         device = next(self.audio_vae.parameters()).device
         raw = self.audio_vae.decode(latents.to(device=device, dtype=torch.float32))
@@ -180,6 +189,9 @@ class _DirectVoxCPMAudioVAE:
             stream = audio
         else:
             stream = audio.reshape(audio.shape[0], -1)
+        flattened = stream.reshape(-1).detach().cpu().to(torch.float32)
+        if left_context_size > 0:
+            return self._stage1_decoder.trim_left_context(flattened, left_context_size)
         if trim_streaming_patch:
-            stream = stream[..., -self._stream_audio_patch_samples :]
-        return stream.reshape(-1).detach().cpu().to(torch.float32)
+            return flattened[-self._stream_audio_patch_samples :]
+        return flattened

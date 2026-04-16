@@ -22,6 +22,7 @@ _ARCH_TO_MODEL_TYPE: dict[str, str] = {
     "OmniVoiceModel": "omnivoice",
     "VoxCPM2TalkerForConditionalGeneration": "voxcpm2",
     "VoxCPMForConditionalGeneration": "voxcpm",
+    "VoxCPMStage0PagedForConditionalGeneration": "voxcpm",
 }
 
 # Maps model architecture names to tokenizer subfolder paths within HF repos.

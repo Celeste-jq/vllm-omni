@@ -245,3 +245,26 @@ def _build_prompt_cache_with_soundfile(model: Any, *args: Any, **kwargs: Any) ->
         "prompt_text": prompt_text,
         "audio_feat": audio_feat,
     }
+
+
+def load_native_voxcpm_model(
+    model_path: str,
+    *,
+    device: torch.device,
+    dtype: str | None,
+) -> Any:
+    from .voxcpm import _import_voxcpm_model_class
+    from .voxcpm_runtime_utils import resolve_voxcpm_model_dir
+
+    VoxCPMModel = _import_voxcpm_model_class()
+    model_dir = resolve_voxcpm_model_dir(model_path)
+    runtime_model_path = _prepare_runtime_model_dir(model_dir, target_device=device, target_dtype=dtype)
+
+    if device.type == "npu" and hasattr(torch, "npu"):
+        torch.npu.set_device(device)
+
+    with _force_cuda_available_for_npu(device):
+        return VoxCPMModel.from_local(
+            runtime_model_path,
+            optimize=device.type == "cuda",
+        )

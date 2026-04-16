@@ -151,6 +151,11 @@ _OMNI_MODELS = {
         "voxcpm",
         "VoxCPMForConditionalGeneration",
     ),
+    "VoxCPMStage0PagedForConditionalGeneration": (
+        "voxcpm",
+        "voxcpm_stage0_talker",
+        "VoxCPMStage0PagedForConditionalGeneration",
+    ),
     ## VoxCPM2
     "VoxCPM2TalkerForConditionalGeneration": (
         "voxcpm2",

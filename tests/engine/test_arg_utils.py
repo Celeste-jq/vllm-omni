@@ -167,7 +167,14 @@ def test_stage_configs_path_field():
     assert args.stage_configs_path == "/some/path.yaml"
 
 
-def test_voxcpm_model_arch_injects_model_type_override(mocker):
+@pytest.mark.parametrize(
+    "model_arch",
+    [
+        "VoxCPMForConditionalGeneration",
+        "VoxCPMStage0PagedForConditionalGeneration",
+    ],
+)
+def test_voxcpm_model_arch_injects_model_type_override(mocker, model_arch):
     """Ensure VoxCPM model_arch injects hf_overrides for config resolution."""
     mocker.patch.object(OmniEngineArgs, "_ensure_omni_models_registered", return_value=True)
     mocker.patch.object(OmniEngineArgs, "_patch_empty_hf_config")
@@ -176,11 +183,11 @@ def test_voxcpm_model_arch_injects_model_type_override(mocker):
 
     args = OmniEngineArgs(
         model="OpenBMB/VoxCPM1.5",
-        model_arch="VoxCPMForConditionalGeneration",
+        model_arch=model_arch,
     )
     args.create_model_config()
 
-    assert args.hf_overrides["architectures"] == ["VoxCPMForConditionalGeneration"]
+    assert args.hf_overrides["architectures"] == [model_arch]
     assert args.hf_overrides["model_type"] == "voxcpm"
     args._patch_empty_hf_config.assert_called_once_with("voxcpm")
 
