@@ -12,9 +12,22 @@ from typing import Any, Callable
 class PhaseRecorder:
     def __init__(self) -> None:
         self.records: list[tuple[str, float]] = []
+        self._active_phases: list[str] = []
 
     def add(self, name: str, duration_sec: float) -> None:
         self.records.append((name, duration_sec))
+
+    def is_active(self, name: str) -> bool:
+        return name in self._active_phases
+
+    def push_active(self, name: str) -> None:
+        self._active_phases.append(name)
+
+    def pop_active(self, name: str) -> None:
+        for index in range(len(self._active_phases) - 1, -1, -1):
+            if self._active_phases[index] == name:
+                del self._active_phases[index]
+                return
 
 
 def classify_dit_phase(model_name: str) -> str:
@@ -122,12 +135,20 @@ def _synchronize() -> None:
 
 @contextmanager
 def phase(recorder: PhaseRecorder, name: str):
+    if recorder.is_active(name):
+        yield
+        return
+
+    recorder.push_active(name)
     _synchronize()
     start = time.perf_counter()
-    with npu_range(name):
-        yield
-    _synchronize()
-    recorder.add(name, time.perf_counter() - start)
+    try:
+        with npu_range(name):
+            yield
+    finally:
+        _synchronize()
+        recorder.add(name, time.perf_counter() - start)
+        recorder.pop_active(name)
 
 
 def _wrap_bound_method(
@@ -138,6 +159,29 @@ def _wrap_bound_method(
     original = getattr(owner, method_name)
     wrapped = wrapper_factory(original)
     setattr(owner, method_name, wrapped)
+
+
+def _resolve_model_name(pipeline: Any, current_model: Any = None) -> str:
+    model_name = getattr(current_model, "_profile_name", None)
+    if model_name is not None:
+        return model_name
+    if hasattr(pipeline, "transformer_2") and current_model is getattr(pipeline, "transformer_2", None):
+        return "transformer_2"
+    return "transformer"
+
+
+def _resolve_dit_phase_name(
+    pipeline: Any,
+    *,
+    current_model: Any = None,
+    positive_kwargs: dict[str, Any] | None = None,
+    negative_kwargs: dict[str, Any] | None = None,
+) -> str:
+    if current_model is None and positive_kwargs is not None:
+        current_model = positive_kwargs.get("current_model")
+    if current_model is None and negative_kwargs is not None:
+        current_model = negative_kwargs.get("current_model")
+    return classify_dit_phase(_resolve_model_name(pipeline, current_model))
 
 
 def apply_pipeline_profiling_patch(pipeline: Any, recorder: PhaseRecorder) -> None:
@@ -184,18 +228,49 @@ def apply_pipeline_profiling_patch(pipeline: Any, recorder: PhaseRecorder) -> No
                 current_model = kwargs.get("current_model")
                 if current_model is None and args:
                     current_model = args[0]
-                model_name = getattr(current_model, "_profile_name", None)
-                if model_name is None:
-                    if hasattr(pipeline, "transformer_2") and current_model is getattr(pipeline, "transformer_2", None):
-                        model_name = "transformer_2"
-                    else:
-                        model_name = "transformer"
-                phase_name = classify_dit_phase(model_name)
+                phase_name = _resolve_dit_phase_name(pipeline, current_model=current_model)
                 with phase(recorder, phase_name):
                     return original(*args, **kwargs)
 
             return inner
 
         _wrap_bound_method(pipeline, "predict_noise", wrap_predict_noise)
+
+    if hasattr(pipeline, "predict_noise_maybe_with_cfg"):
+        def wrap_predict_noise_maybe_with_cfg(original: Callable[..., Any]) -> Callable[..., Any]:
+            @wraps(original)
+            def inner(*args: Any, **kwargs: Any) -> Any:
+                positive_kwargs = kwargs.get("positive_kwargs")
+                negative_kwargs = kwargs.get("negative_kwargs")
+                if positive_kwargs is None and len(args) >= 3:
+                    positive_kwargs = args[2]
+                if negative_kwargs is None and len(args) >= 4:
+                    negative_kwargs = args[3]
+                phase_name = _resolve_dit_phase_name(
+                    pipeline,
+                    positive_kwargs=positive_kwargs,
+                    negative_kwargs=negative_kwargs,
+                )
+                pipeline._wan_i2v_profile_last_dit_phase = phase_name
+                with phase(recorder, phase_name):
+                    return original(*args, **kwargs)
+
+            return inner
+
+        _wrap_bound_method(pipeline, "predict_noise_maybe_with_cfg", wrap_predict_noise_maybe_with_cfg)
+
+    if hasattr(pipeline, "scheduler_step_maybe_with_cfg"):
+        def wrap_scheduler_step_maybe_with_cfg(original: Callable[..., Any]) -> Callable[..., Any]:
+            @wraps(original)
+            def inner(*args: Any, **kwargs: Any) -> Any:
+                phase_name = getattr(pipeline, "_wan_i2v_profile_last_dit_phase", None)
+                if phase_name is None:
+                    return original(*args, **kwargs)
+                with phase(recorder, phase_name):
+                    return original(*args, **kwargs)
+
+            return inner
+
+        _wrap_bound_method(pipeline, "scheduler_step_maybe_with_cfg", wrap_scheduler_step_maybe_with_cfg)
 
     pipeline._wan_i2v_profile_patch_applied = True
