@@ -397,14 +397,14 @@ def execute_request(runner, runtime: dict[str, Any], request):
         return runner.execute_model(request)
 
 
-def maybe_postprocess_output(output, request, post_process_func, enable_cpu_offload: bool):
+def maybe_postprocess_output(output, request, post_process_func, enable_cpu_offload: bool, rank: int = 0):
     import torch
 
     output_data = output.output
     if enable_cpu_offload and isinstance(output_data, torch.Tensor) and output_data.device.type != "cpu":
         output_data = output_data.cpu()
 
-    if post_process_func is None:
+    if post_process_func is None or rank != 0:
         return output_data
 
     if "sampling_params" in inspect.signature(post_process_func).parameters:
@@ -539,7 +539,13 @@ def run_once(args: argparse.Namespace, runtime: dict[str, Any], runner, pre_proc
     request = build_request(args, runtime)
     request = maybe_preprocess_request(request, pre_process_func)
     output = execute_request(runner, runtime, request)
-    return maybe_postprocess_output(output, request, post_process_func, runtime["od_config"].enable_cpu_offload)
+    return maybe_postprocess_output(
+        output,
+        request,
+        post_process_func,
+        runtime["od_config"].enable_cpu_offload,
+        rank=runtime["rank"],
+    )
 
 
 def aggregate_rank_summaries(root_dir: Path, world_size: int) -> None:
