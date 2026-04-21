@@ -56,12 +56,15 @@ torchrun --nproc_per_node=4 tools/profile_wan_i2v.py \
 ```text
 profiling_runs/wan_i2v_profile/
   aggregate_summary.json
+  aggregate_run_metadata.json
   aggregate_summary.txt
   rank0/
+    run_metadata.json
     summary.json
     summary.txt
     trace/
   rank1/
+    run_metadata.json
     summary.json
     summary.txt
     trace/
@@ -71,8 +74,21 @@ profiling_runs/wan_i2v_profile/
 说明：
 
 - 每个 `rank*/summary.json` 是该 rank 自己的模块级统计。
+- 每个 `rank*/run_metadata.json` 会记录该 rank 的 profiled run wall time、峰值显存和并行配置。
 - `aggregate_summary.json` 是按 phase 汇总后的总视图，便于和 MindIE 侧结果做横向对比。
+- `aggregate_run_metadata.json` 会聚合 rank 级 wall time 与峰值显存，便于外层 benchmark 脚本直接读取。
 - `trace/` 下是 `torch_npu.profiler.tensorboard_trace_handler(...)` 产生的 trace 数据。
+
+## 与 HSDP 对比脚本配合
+
+如果需要自动对比 baseline 与 HSDP 两组场景，可直接使用 [`tools/benchmark_wan_i2v_hsdp.py`](../tools/benchmark_wan_i2v_hsdp.py)。
+
+该脚本会复用本 profiling 入口，并额外产出：
+
+- `comparison.json`
+- `scenario_summary.csv`
+- `phase_summary.csv`
+- `comparison.md`
 
 ## 实现路径
 

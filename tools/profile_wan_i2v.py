@@ -9,6 +9,7 @@ import inspect
 import json
 import os
 import sys
+import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -115,6 +116,85 @@ def build_cache_config(args: argparse.Namespace) -> dict[str, Any] | None:
 
 def ensure_parent(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+
+
+def _device_memory_backend():
+    import torch
+
+    for backend_name in ("npu", "cuda", "xpu", "musa"):
+        backend = getattr(torch, backend_name, None)
+        if backend is None:
+            continue
+        is_available = getattr(backend, "is_available", None)
+        if callable(is_available) and is_available():
+            return backend_name, backend
+    return None, None
+
+
+def reset_peak_memory_stats_if_available() -> None:
+    _, backend = _device_memory_backend()
+    if backend is None:
+        return
+    reset_peak_memory_stats = getattr(backend, "reset_peak_memory_stats", None)
+    if callable(reset_peak_memory_stats):
+        reset_peak_memory_stats()
+
+
+def collect_memory_stats() -> dict[str, Any]:
+    backend_name, backend = _device_memory_backend()
+    if backend is None:
+        return {
+            "device_type": None,
+            "peak_allocated_bytes": None,
+            "peak_reserved_bytes": None,
+        }
+
+    peak_allocated = getattr(backend, "max_memory_allocated", None)
+    peak_reserved = getattr(backend, "max_memory_reserved", None)
+    return {
+        "device_type": backend_name,
+        "peak_allocated_bytes": int(peak_allocated()) if callable(peak_allocated) else None,
+        "peak_reserved_bytes": int(peak_reserved()) if callable(peak_reserved) else None,
+    }
+
+
+def write_run_metadata(rank_dir: Path, payload: dict[str, Any]) -> None:
+    rank_dir.mkdir(parents=True, exist_ok=True)
+    (rank_dir / "run_metadata.json").write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n"
+    )
+
+
+def aggregate_run_metadata_payloads(payloads: list[dict[str, Any]]) -> dict[str, Any]:
+    peak_allocated_values = [
+        payload.get("memory", {}).get("peak_allocated_bytes")
+        for payload in payloads
+        if payload.get("memory", {}).get("peak_allocated_bytes") is not None
+    ]
+    peak_reserved_values = [
+        payload.get("memory", {}).get("peak_reserved_bytes")
+        for payload in payloads
+        if payload.get("memory", {}).get("peak_reserved_bytes") is not None
+    ]
+    wall_times = [payload.get("wall_time_sec") for payload in payloads if payload.get("wall_time_sec") is not None]
+
+    return {
+        "world_size": len(payloads),
+        "max_wall_time_sec": max(wall_times) if wall_times else None,
+        "avg_wall_time_sec": sum(wall_times) / len(wall_times) if wall_times else None,
+        "memory": {
+            "max_peak_allocated_bytes": max(peak_allocated_values) if peak_allocated_values else None,
+            "max_peak_reserved_bytes": max(peak_reserved_values) if peak_reserved_values else None,
+        },
+        "ranks": payloads,
+    }
+
+
+def write_aggregate_run_metadata(root_dir: Path, payloads: list[dict[str, Any]]) -> None:
+    aggregate_payload = aggregate_run_metadata_payloads(payloads)
+    (root_dir / "aggregate_run_metadata.json").write_text(
+        json.dumps(aggregate_payload, indent=2, sort_keys=True) + "\n"
+    )
 
 
 def _is_distributed_ready() -> bool:
@@ -472,6 +552,16 @@ def aggregate_rank_summaries(root_dir: Path, world_size: int) -> None:
         write_aggregate_summary(root_dir, payloads)
 
 
+def aggregate_rank_run_metadata(root_dir: Path, world_size: int) -> None:
+    payloads: list[dict[str, Any]] = []
+    for rank in range(world_size):
+        metadata_path = root_dir / f"rank{rank}" / "run_metadata.json"
+        if metadata_path.exists():
+            payloads.append(json.loads(metadata_path.read_text()))
+    if payloads:
+        write_aggregate_run_metadata(root_dir, payloads)
+
+
 def main() -> None:
     args = parse_args()
     import PIL.Image
@@ -503,19 +593,53 @@ def main() -> None:
                 current_omni_platform.empty_cache()
 
         barrier_if_needed()
+        reset_peak_memory_stats_if_available()
+        start_time = time.perf_counter()
         with torch_npu_profile_context(trace_dir, args):
             processed = run_once(args, runtime, runner, pre_process_func, post_process_func)
+        wall_time_sec = time.perf_counter() - start_time
         write_summary_outputs(rank_dir, recorder.records)
+        write_run_metadata(
+            rank_dir,
+            {
+                "rank": runtime["rank"],
+                "local_rank": runtime["local_rank"],
+                "world_size": runtime["world_size"],
+                "wall_time_sec": wall_time_sec,
+                "memory": collect_memory_stats(),
+                "parallel": {
+                    "ulysses_degree": args.ulysses_degree,
+                    "ring_degree": args.ring_degree,
+                    "tensor_parallel_size": args.tensor_parallel_size,
+                    "cfg_parallel_size": args.cfg_parallel_size,
+                    "vae_patch_parallel_size": args.vae_patch_parallel_size,
+                    "use_hsdp": args.use_hsdp,
+                    "hsdp_shard_size": args.hsdp_shard_size,
+                    "hsdp_replicate_size": args.hsdp_replicate_size,
+                },
+                "request": {
+                    "height": args.height,
+                    "width": args.width,
+                    "num_frames": args.num_frames,
+                    "num_inference_steps": args.num_inference_steps,
+                    "prompt": args.prompt,
+                    "image": args.image,
+                },
+            },
+        )
 
         barrier_if_needed()
         if runtime["rank"] == 0:
             processed_video = extract_video_payload(processed)
             save_video(processed_video, Path(args.output), fps=args.fps)
             aggregate_rank_summaries(root_dir, runtime["world_size"])
+            aggregate_rank_run_metadata(root_dir, runtime["world_size"])
             print(f"[Profiling] trace dir: {trace_dir}")
             print(f"[Profiling] rank0 summary: {rank_dir / 'summary.json'}")
             if (root_dir / "aggregate_summary.json").exists():
                 print(f"[Profiling] aggregate summary: {root_dir / 'aggregate_summary.json'}")
+            if (root_dir / "aggregate_run_metadata.json").exists():
+                print(f"[Profiling] aggregate run metadata: {root_dir / 'aggregate_run_metadata.json'}")
             print(f"[Profiling] saved video: {args.output}")
     finally:
         destroy_distributed_env()
